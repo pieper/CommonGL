@@ -5,22 +5,23 @@ from slicer.ScriptedLoadableModule import *
 import logging
 
 #
-# ShadedModels
+# ShaderComputation
 #
 
-class ShadedModels(ScriptedLoadableModule):
+class ShaderComputation(ScriptedLoadableModule):
   """Uses ScriptedLoadableModule base class, available at:
   https://github.com/Slicer/Slicer/blob/master/Base/Python/slicer/ScriptedLoadableModule.py
   """
 
   def __init__(self, parent):
     ScriptedLoadableModule.__init__(self, parent)
-    self.parent.title = "ShadedModels" # TODO make this more human readable by adding spaces
-    self.parent.categories = ["Rendering"]
+    self.parent.title = "ShaderComputation" # TODO make this more human readable by adding spaces
+    self.parent.categories = ["Examples"]
     self.parent.dependencies = []
     self.parent.contributors = ["Steve Pieper (Isomics, Inc.)"] # replace with "Firstname Lastname (Organization)"
     self.parent.helpText = """
-    This is a test for CommonCL shader functionality.
+    This is an example of using the vtkOpenGLShaderComputation class to perform
+    some cool computation.
     """
     self.parent.acknowledgementText = """
     This file was originally developed by Jean-Christophe Fillion-Robin, Kitware Inc.
@@ -28,10 +29,10 @@ class ShadedModels(ScriptedLoadableModule):
 """ # replace with organization, grant and thanks.
 
 #
-# ShadedModelsWidget
+# ShaderComputationWidget
 #
 
-class ShadedModelsWidget(ScriptedLoadableModuleWidget):
+class ShaderComputationWidget(ScriptedLoadableModuleWidget):
   """Uses ScriptedLoadableModuleWidget base class, available at:
   https://github.com/Slicer/Slicer/blob/master/Base/Python/slicer/ScriptedLoadableModule.py
   """
@@ -126,16 +127,16 @@ class ShadedModelsWidget(ScriptedLoadableModuleWidget):
     self.applyButton.enabled = self.inputSelector.currentNode() and self.outputSelector.currentNode()
 
   def onApplyButton(self):
-    logic = ShadedModelsLogic()
+    logic = ShaderComputationLogic()
     enableScreenshotsFlag = self.enableScreenshotsFlagCheckBox.checked
     imageThreshold = self.imageThresholdSliderWidget.value
     logic.run(self.inputSelector.currentNode(), self.outputSelector.currentNode(), imageThreshold, enableScreenshotsFlag)
 
 #
-# ShadedModelsLogic
+# ShaderComputationLogic
 #
 
-class ShadedModelsLogic(ScriptedLoadableModuleLogic):
+class ShaderComputationLogic(ScriptedLoadableModuleLogic):
   """This class should implement all the actual
   computation done by your module.  The interface
   should be such that other python code can import
@@ -226,14 +227,14 @@ class ShadedModelsLogic(ScriptedLoadableModuleLogic):
 
     # Capture screenshot
     if enableScreenshots:
-      self.takeScreenshot('ShadedModelsTest-Start','MyScreenshot',-1)
+      self.takeScreenshot('ShaderComputationTest-Start','MyScreenshot',-1)
 
     logging.info('Processing completed')
 
     return True
 
 
-class ShadedModelsTest(ScriptedLoadableModuleTest):
+class ShaderComputationTest(ScriptedLoadableModuleTest):
   """
   This is the test case for your scripted module.
   Uses ScriptedLoadableModuleTest base class, available at:
@@ -243,15 +244,16 @@ class ShadedModelsTest(ScriptedLoadableModuleTest):
   def setUp(self):
     """ Do whatever is needed to reset the state - typically a scene clear will be enough.
     """
-    slicer.mrmlScene.Clear(0)
+    # slicer.mrmlScene.Clear(0)
+    pass
 
   def runTest(self):
     """Run as few or as many tests as needed here.
     """
     self.setUp()
-    self.test_ShadedModels1()
+    self.test_ShaderComputation1()
 
-  def test_ShadedModels1(self):
+  def test_ShaderComputation1(self):
     """ Ideally you should have several levels of tests.  At the lowest level
     tests should exercise the functionality of the logic with different inputs
     (both valid and invalid).  At higher levels your tests should emulate the
@@ -263,12 +265,14 @@ class ShadedModelsTest(ScriptedLoadableModuleTest):
     your test should break so they know that the feature is needed.
     """
 
-    self.delayDisplay("Starting the test")
+    self.delayDisplay("Starting the test", 100)
 
-    import SampleData
-    sampleDataLogic = SampleData.SampleDataLogic()
-    print("Getting MR Head Volume")
-    mrHeadVolume = sampleDataLogic.downloadMRHead()
+    mrHeadVolume = slicer.util.getNode('MRHead')
+    if not mrHeadVolume:
+      import SampleData
+      sampleDataLogic = SampleData.SampleDataLogic()
+      print("Getting MR Head Volume")
+      mrHeadVolume = sampleDataLogic.downloadMRHead()
 
     resize = vtk.vtkImageResize()
     resize.SetInputDataObject(mrHeadVolume.GetImageData())
@@ -276,22 +280,24 @@ class ShadedModelsTest(ScriptedLoadableModuleTest):
     resize.Update()
 
 
-    tdw = slicer.qMRMLThreeDWidget()
-    tdw.setMRMLScene(slicer.mrmlScene)
-    tdw.setMRMLViewNode(slicer.util.getNode("*ViewNode*"))
-    tdw.show()
-
     from vtkSlicerShadedActorModuleLogicPython import *
 
-    shadedActor=vtkOpenGLShadedActor()
+    lm = slicer.app.layoutManager()
+    tdw = lm.threeDWidget(0)
     tdv = tdw.threeDView()
     rw = tdv.renderWindow()
     rens = rw.GetRenderers()
     ren = rens.GetItemAsObject(0)
-    ren.AddActor(shadedActor)
-    mapper = vtk.vtkPolyDataMapper()
-    shadedActor.SetMapper(mapper)
-    shadedActor.SetVertexShaderSource("""
+
+    renderWindow = vtk.vtkRenderWindow()
+    renderer = vtk.vtkRenderer()
+    renderer.SetRenderWindow(renderWindow)
+  
+
+    shaderComputation=vtkOpenGLShaderComputation()
+    shaderComputation.Initialize(renderer)
+
+    shaderComputation.SetVertexShaderSource("""
       #version 120
       attribute vec3 vertexAttribute;
       attribute vec2 textureCoordinateAttribute;
@@ -305,7 +311,7 @@ class ShadedModelsTest(ScriptedLoadableModuleTest):
       }
     """)
 
-    shadedActor.SetFragmentShaderSource("""
+    shaderComputation.SetFragmentShaderSource("""
       #version 120
       varying vec4 interpolatedColor;
       varying vec3 interpolatedTextureCoordinate;
@@ -324,35 +330,24 @@ class ShadedModelsTest(ScriptedLoadableModuleTest):
           vec4 volumeSample = texture3D(volumeSampler, samplePoint);
           integratedRay += volumeSample;
         }
+        gl_FragColor = mix( interpolatedColor, integratedRay, 0.5);
         gl_FragColor = integratedRay;
       }
     """)
-    shadedActor.SetTextureImageData(resize.GetOutputDataObject(0))
-    #shadedActor.SetTextureImageData(mrHeadVolume.GetImageData())
-    sphereSource = vtk.vtkSphereSource()
-    mapper.SetInputConnection(sphereSource.GetOutputPort())
-    actor = vtk.vtkActor()
-    actor.SetScale(20,20,20)
-    actor.SetMapper(mapper)
-    ren.AddActor(actor)
-    rw.Render()
+    shaderComputation.SetTextureImageData(resize.GetOutputDataObject(0))
 
-    wti = vtk.vtkWindowToImageFilter()
-    wti.SetInput(rw)
+    resultImage = vtk.vtkImageData()
+    resultImage.SetDimensions(512, 512, 1)
+    resultImage.AllocateScalars(vtk.VTK_UNSIGNED_CHAR, 4)
+    shaderComputation.SetResultImageData(resultImage)
+
+    shaderComputation.Compute()
+
     iv = vtk.vtkImageViewer()
     iv.SetColorLevel(128)
     iv.SetColorWindow(256)
-    iv.SetInputConnection(wti.GetOutputPort())
+    iv.SetInputData(resultImage)
     iv.Render()
 
-    extensionManager = vtk.vtkOpenGLExtensionManager()
-    extensionManager.SetRenderWindow(rw)
-    extensionManager.Update()
-    print(extensionManager) 
-    print(extensionManager.GetDriverGLVendor()) 
-    print(extensionManager.GetDriverGLVersion()) 
-    print(extensionManager.GetDriverGLRenderer()) 
-
-    slicer.modules.ShadedModelsWidget.tdw = tdw
-    slicer.modules.ShadedModelsWidget.iv = iv
+    slicer.modules.ShaderComputationWidget.iv = iv
 

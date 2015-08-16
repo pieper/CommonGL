@@ -1,7 +1,7 @@
 /*=========================================================================
 
   Program:   Visualization Toolkit
-  Module:    $RCSfile: vtkOpenGLShadedActor.cxx,v $
+  Module:    $RCSfile: vtkOpenGLShaderComputation.cxx,v $
 
   Copyright (c) Ken Martin, Will Schroeder, Bill Lorensen
   All rights reserved.
@@ -12,31 +12,33 @@
      PURPOSE.  See the above copyright notice for more information.
 
 =========================================================================*/
-#include "vtkOpenGLShadedActor.h"
+#include "vtkOpenGLShaderComputation.h"
 
 #include "vtkDataArray.h"
 #include "vtkImageData.h"
-#include "vtkMapper.h"
-#include "vtkMatrix4x4.h"
 #include "vtkObjectFactory.h"
+#include "vtkOpenGLExtensionManager.h"
 #include "vtkOpenGLRenderer.h"
+#include "vtkOpenGLRenderWindow.h"
+#include "vtkRenderer.h"
 #include "vtkPointData.h"
-#include "vtkPolyData.h"
-#include "vtkPolyDataMapper.h"
-#include "vtkProperty.h"
 
 #include "vtkOpenGL.h"
+#include "vtkgl.h"
+
 #include <math.h>
 
 //----------------------------------------------------------------------------
-vtkStandardNewMacro(vtkOpenGLShadedActor);
+vtkStandardNewMacro(vtkOpenGLShaderComputation);
 
 //----------------------------------------------------------------------------
-vtkOpenGLShadedActor::vtkOpenGLShadedActor()
+vtkOpenGLShaderComputation::vtkOpenGLShaderComputation()
 {
+  this->Initialized = false;
   this->VertexShaderSource = NULL;
   this->FragmentShaderSource = NULL;
   this->TextureImageData = NULL;
+  this->ResultImageData = NULL;
   this->ProgramObject = 0;
   this->ProgramObjectMTime = 0;
   this->TextureID = 0;
@@ -44,11 +46,12 @@ vtkOpenGLShadedActor::vtkOpenGLShadedActor()
 }
 
 //----------------------------------------------------------------------------
-vtkOpenGLShadedActor::~vtkOpenGLShadedActor()
+vtkOpenGLShaderComputation::~vtkOpenGLShaderComputation()
 {
   this->SetVertexShaderSource(NULL);
   this->SetFragmentShaderSource(NULL);
   this->SetTextureImageData(NULL);
+  this->SetResultImageData(NULL);
   if (this->ProgramObject > 0)
     {
     glDeleteProgram ( this->ProgramObject );
@@ -93,7 +96,7 @@ static GLenum vtkScalarTypeToGLType(int vtk_scalar_type)
 // Create a shader object, load the shader source, and
 // compile the shader.
 //
-static GLuint CompileShader ( vtkOpenGLShadedActor *self, GLenum type, const char *shaderSource )
+static GLuint CompileShader ( vtkOpenGLShaderComputation *self, GLenum type, const char *shaderSource )
 {
   GLuint shader;
   GLint compiled;
@@ -140,7 +143,7 @@ static GLuint CompileShader ( vtkOpenGLShadedActor *self, GLenum type, const cha
 //----------------------------------------------------------------------------
 // Rebuild the shader program if needed
 //
-bool vtkOpenGLShadedActor::UpdateProgram()
+bool vtkOpenGLShaderComputation::UpdateProgram()
 {
   GLuint vertexShader;
   GLuint fragmentShader;
@@ -206,7 +209,7 @@ bool vtkOpenGLShadedActor::UpdateProgram()
 //----------------------------------------------------------------------------
 // Reload the texture if needed
 //
-bool vtkOpenGLShadedActor::UpdateTexture()
+bool vtkOpenGLShaderComputation::UpdateTexture()
 {
   if (this->GetMTime() > this->TextureMTime)
     {
@@ -262,28 +265,139 @@ bool vtkOpenGLShadedActor::UpdateTexture()
   return true;
 }
 
+//-----------------------------------------------------------------------------
+void vtkOpenGLShaderComputation::Initialize(vtkRenderer *renderer)
+{
+  if (this->Initialized)
+    {
+    return;
+    }
+
+  this->Initialized = true;
+
+  vtkOpenGLRenderWindow *renwin
+    = vtkOpenGLRenderWindow::SafeDownCast(renderer->GetRenderWindow());
+
+  // load required extensions
+  vtkOpenGLExtensionManager *extensions = renwin->GetExtensionManager();
+  extensions->LoadExtension("GL_ARB_framebuffer_object");
+}
+
+
+//-----------------------------------------------------------------------------
+bool vtkOpenGLShaderComputation::SetupFramebuffer()
+{
+  //
+  // adapted from 
+  // https://www.opengl.org/wiki/Framebuffer_Object_Examples
+  //
+
+  int resultDimensions[3];
+  this->ResultImageData->GetDimensions(resultDimensions);
+
+  //
+  // generate and bind our Framebuffer
+  vtkgl::GenFramebuffers(1, &(this->FramebufferID));
+  vtkgl::BindFramebuffer(vtkgl::FRAMEBUFFER, this->FramebufferID);
+
+  //
+  // Create and attach a color buffer
+  // * We must bind this->ColorRenderbufferID before we call glRenderbufferStorage
+  // * The storage format is RGBA8
+  // * Attach color buffer to FBO
+  //
+  vtkgl::GenRenderbuffers(1, &(this->ColorRenderbufferID));
+  vtkgl::BindRenderbuffer(vtkgl::RENDERBUFFER, this->ColorRenderbufferID);
+  vtkgl::RenderbufferStorage(vtkgl::RENDERBUFFER, GL_RGBA8, 
+                           resultDimensions[0], resultDimensions[1]);
+  vtkgl::FramebufferRenderbuffer(vtkgl::FRAMEBUFFER, 
+                               vtkgl::COLOR_ATTACHMENT0, 
+                               vtkgl::RENDERBUFFER, 
+                               this->ColorRenderbufferID);
+ 
+  //
+  // Now do the same for the depth buffer
+  //
+  vtkgl::GenRenderbuffers(1, &(this->DepthRenderbufferID));
+  vtkgl::BindRenderbuffer(vtkgl::RENDERBUFFER, this->DepthRenderbufferID);
+  vtkgl::RenderbufferStorage(vtkgl::RENDERBUFFER, GL_DEPTH_COMPONENT24, 
+                           resultDimensions[0], resultDimensions[1]);
+  vtkgl::FramebufferRenderbuffer(vtkgl::FRAMEBUFFER, 
+                               vtkgl::DEPTH_ATTACHMENT, 
+                               vtkgl::RENDERBUFFER, 
+                               this->DepthRenderbufferID);
+
+  //
+  // Does the GPU support current Framebuffer configuration?
+  //
+  GLenum status;
+  status = vtkgl::CheckFramebufferStatus(vtkgl::FRAMEBUFFER);
+  switch(status)
+    {
+    case vtkgl::FRAMEBUFFER_COMPLETE:
+      break;
+    default:
+      vtkErrorMacro("Bad framebuffer configuration, status is: " << status);
+      return false;
+    }
+
+  //
+  // now we can render to the FBO (also called RenderBuffer)
+  //
+  vtkgl::BindFramebuffer(vtkgl::FRAMEBUFFER, this->FramebufferID);
+  glClearColor(0.0, 0.0, 0.0, 0.0);
+  glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+  //
+  // Set up a normalized rendering environment
+  //
+  glViewport(0, 0, resultDimensions[0], resultDimensions[1]);
+  glMatrixMode(GL_PROJECTION);
+  glLoadIdentity();
+  glOrtho(0.0, resultDimensions[0], 0.0, resultDimensions[1], -1.0, 1.0); 
+  glMatrixMode(GL_MODELVIEW);
+  glLoadIdentity();
+  glDisable(GL_TEXTURE_2D);
+  glDisable(GL_BLEND);
+  glEnable(GL_DEPTH_TEST);
+ 
+  return true;
+}
+
 //----------------------------------------------------------------------------
-// Actual scripted actor render method.
+// Perform the computation
 //
-// This is essenitally the core of vtkOpenGLActor, but with option to specify
-// the shader program source.
-// It is not used directly, but the mapper available to access rendering parameters.
-//
-//
-void vtkOpenGLShadedActor::Render(vtkRenderer *ren, vtkMapper *mapper)
+void vtkOpenGLShaderComputation::Compute()
 {
 
   // bail out early if we aren't configured corretly
   if (this->VertexShaderSource == NULL || this->FragmentShaderSource == NULL)
     {
-    vtkErrorMacro("Both vertex and fragment shaders are needed for a shaded actor.");
+    vtkErrorMacro("Both vertex and fragment shaders are needed for a shader computation.");
     return;
     }
 
-  vtkPolyDataMapper *polyDataMapper = vtkPolyDataMapper::SafeDownCast(mapper);
-  if (polyDataMapper == NULL)
+  if (this->ResultImageData == NULL 
+      || 
+      this->ResultImageData->GetPointData() == NULL
+      || 
+      this->ResultImageData->GetPointData()->GetScalars() == NULL
+      || 
+      this->ResultImageData->GetPointData()->GetScalars()->GetVoidPointer(0) == NULL)
     {
-    vtkErrorMacro("Need a vtkPolyDataMapper.");
+    vtkErrorMacro("Result image data is not correctly set up.");
+    return;
+    }
+
+  int resultDimensions[3];
+  this->ResultImageData->GetDimensions(resultDimensions);
+  vtkPointData *pointData = this->ResultImageData->GetPointData();
+  vtkDataArray *scalars = pointData->GetScalars();
+  void *resultPixels = scalars->GetVoidPointer(0);
+
+  if (!this->SetupFramebuffer())
+    {
+    vtkErrorMacro("Could not set up a framebuffer.");
     return;
     }
 
@@ -298,6 +412,8 @@ void vtkOpenGLShadedActor::Render(vtkRenderer *ren, vtkMapper *mapper)
     vtkErrorMacro("Could not update texture.");
     return;
     }
+
+
 
   GLfloat planeVertices[] = { -1.0f, -1.0f, 0.0f,
                               -1.0f,  1.0f, 0.0f,
@@ -336,21 +452,30 @@ void vtkOpenGLShadedActor::Render(vtkRenderer *ren, vtkMapper *mapper)
   GLuint volumeSamplerLocation = glGetUniformLocation(this->ProgramObject, "volumeSampler");
   glUniform1i(volumeSamplerLocation, 0);
 
+  //
+  // GO!
+  //
   glDrawArrays ( GL_QUADS, 0, 4 );
+ 
+  //
+  // Collect the results of the calculation
+  //
+  glReadPixels(0, 0, resultDimensions[0], resultDimensions[1], GL_BGRA, GL_UNSIGNED_BYTE, resultPixels);
 
   // Don't use the program anymore
   glUseProgram ( 0 );
 
-
-  // - add a vtkCollection of vtkImageData and make each one a texture3D (in order)
-  // - bind the vertex array and the texture coordinates
-  // - traverse the vtkPolyData from the mapper and draw the primitives (just triangle
-  //   strips is good enough to start with
+  //Delete temp resources
+  vtkgl::DeleteRenderbuffers(1, &(this->ColorRenderbufferID));
+  vtkgl::DeleteRenderbuffers(1, &(this->DepthRenderbufferID));
+  //Bind 0, which means render to back buffer, as a result, this->FramebufferID is unbound
+  vtkgl::BindFramebuffer(vtkgl::FRAMEBUFFER, 0);
+  vtkgl::DeleteFramebuffers(1, &(this->FramebufferID));
 
 }
 
 //----------------------------------------------------------------------------
-void vtkOpenGLShadedActor::PrintSelf(ostream& os, vtkIndent indent)
+void vtkOpenGLShaderComputation::PrintSelf(ostream& os, vtkIndent indent)
 {
   if ( this->VertexShaderSource )
     {

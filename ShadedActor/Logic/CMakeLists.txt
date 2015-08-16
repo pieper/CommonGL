@@ -12,6 +12,8 @@ set(${KIT}_SRCS
   vtkSlicer${MODULE_NAME}Logic.h
   vtkOpenGLShadedActor.cxx
   vtkOpenGLShadedActor.h
+  vtkOpenGLShaderComputation.cxx
+  vtkOpenGLShaderComputation.h
   )
 
 set(${KIT}_TARGET_LIBRARIES

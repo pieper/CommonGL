@@ -20,6 +20,8 @@ include(${Slicer_USE_FILE})
 # Extension modules
 add_subdirectory(ShadedActor)
 add_subdirectory(ShadedModels)
+add_subdirectory(Isobrush)
+add_subdirectory(ShaderComputation)
 ## NEXT_MODULE
 
 #-----------------------------------------------------------------------------

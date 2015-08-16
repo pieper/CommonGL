@@ -10,3 +10,8 @@ that it can be re-used in a variety of contexts, specifically in WebGL and OpenG
 
 The exact form this will eventually take is still the subject of active investigation.
 Initial efforts are focused on volume rendering.
+
+
+
+Here's an example of volume rendering in a fragment shader using volume texture data from Slicer: 
+![Volume rendering GLSL fragment shader in Slicer](https://raw.githubusercontent.com/pieper/CommonGL/master/images/glsl-brain2.png "Volume rendering GLSL fragment shader in Slicer")

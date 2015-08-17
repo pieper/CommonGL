@@ -26,7 +26,7 @@
 #include "vtkImageData.h"
 
 class vtkImageData;
-class vtkRenderer;
+class vtkOpenGLRenderWindow;
 
 #include "vtkSlicerShadedActorModuleLogicExport.h"
 
@@ -42,7 +42,7 @@ public:
 
   // Description:
   // Loads the required extensions
-  void Initialize(vtkRenderer *renderer);
+  void Initialize(vtkOpenGLRenderWindow *renderWindow);
 
   // Description:
   // Rebuild the shader program if needed

@@ -18,9 +18,7 @@
 #include "vtkImageData.h"
 #include "vtkObjectFactory.h"
 #include "vtkOpenGLExtensionManager.h"
-#include "vtkOpenGLRenderer.h"
 #include "vtkOpenGLRenderWindow.h"
-#include "vtkRenderer.h"
 #include "vtkPointData.h"
 
 #include "vtkOpenGL.h"
@@ -166,6 +164,11 @@ bool vtkOpenGLShaderComputation::UpdateProgram()
   vertexShader = CompileShader ( this, GL_VERTEX_SHADER, this->VertexShaderSource );
   fragmentShader = CompileShader ( this, GL_FRAGMENT_SHADER, this->FragmentShaderSource );
 
+  if ( !vertexShader || !fragmentShader )
+    {
+    return false;
+    }
+
   // Create the program object
   this->ProgramObject = glCreateProgram ( );
 
@@ -266,7 +269,7 @@ bool vtkOpenGLShaderComputation::UpdateTexture()
 }
 
 //-----------------------------------------------------------------------------
-void vtkOpenGLShaderComputation::Initialize(vtkRenderer *renderer)
+void vtkOpenGLShaderComputation::Initialize(vtkOpenGLRenderWindow *renderWindow)
 {
   if (this->Initialized)
     {
@@ -275,11 +278,8 @@ void vtkOpenGLShaderComputation::Initialize(vtkRenderer *renderer)
 
   this->Initialized = true;
 
-  vtkOpenGLRenderWindow *renwin
-    = vtkOpenGLRenderWindow::SafeDownCast(renderer->GetRenderWindow());
-
   // load required extensions
-  vtkOpenGLExtensionManager *extensions = renwin->GetExtensionManager();
+  vtkOpenGLExtensionManager *extensions = renderWindow->GetExtensionManager();
   extensions->LoadExtension("GL_ARB_framebuffer_object");
 }
 

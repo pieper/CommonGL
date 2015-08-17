@@ -279,23 +279,11 @@ class ShaderComputationTest(ScriptedLoadableModuleTest):
     resize.SetOutputDimensions(256,256,128)
     resize.Update()
 
-
     from vtkSlicerShadedActorModuleLogicPython import *
 
-    lm = slicer.app.layoutManager()
-    tdw = lm.threeDWidget(0)
-    tdv = tdw.threeDView()
-    rw = tdv.renderWindow()
-    rens = rw.GetRenderers()
-    ren = rens.GetItemAsObject(0)
-
-    renderWindow = vtk.vtkRenderWindow()
-    renderer = vtk.vtkRenderer()
-    renderer.SetRenderWindow(renderWindow)
-  
-
     shaderComputation=vtkOpenGLShaderComputation()
-    shaderComputation.Initialize(renderer)
+    renderWindow = vtk.vtkRenderWindow()
+    shaderComputation.Initialize(renderWindow)
 
     shaderComputation.SetVertexShaderSource("""
       #version 120

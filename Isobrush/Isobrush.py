@@ -141,7 +141,7 @@ class IsobrushEffectTool(LabelEffect.LabelEffectTool):
 
     #
     # Shader computation
-    # - need to import module here since it may not be in sys.path
+    # - need to import class from module here since it may not be in sys.path
     #   at startup time
     # - uses dummy render window for framebuffer object context
     #
@@ -167,15 +167,17 @@ class IsobrushEffectTool(LabelEffect.LabelEffectTool):
       void main()
       {
         vec3 samplePoint = interpolatedTextureCoordinate;
-        samplePoint.y = 1. - samplePoint.y;
-        vec4 volumeSample = texture3D(volumeSampler, interpolatedTextureCoordinate);
-        volumeSample.r = 0.9;
-        volumeSample.a = 0.4;
+        vec4 volumeSample = 500. * texture3D(volumeSampler, interpolatedTextureCoordinate);
+        volumeSample.g = sin(10. * interpolatedTextureCoordinate.s);
+        volumeSample.b = cos(10. * interpolatedTextureCoordinate.t);
+        volumeSample.a = 0.9;
         gl_FragColor = volumeSample;
       }
     """)
 
     self.initialized = True
+
+    self.previewOn()
 
   def cleanup(self):
     super(IsobrushEffectTool,self).cleanup()
@@ -191,10 +193,10 @@ class IsobrushEffectTool(LabelEffect.LabelEffectTool):
 
     if event == "LeftButtonPressEvent":
       self.actionState = "painting"
-      self.previewOn()
       self.abortEvent(event)
     if event == "MouseMoveEvent":
       xy = self.interactor.GetEventPosition()
+      self.previewOn(xy)
       if self.actionState == "painting":
         self.updateIsocurve(xy)
       else:
@@ -213,7 +215,7 @@ class IsobrushEffectTool(LabelEffect.LabelEffectTool):
       # to the view
       pass
 
-  def previewOn(self):
+  def previewOn(self, xy=(100,100)):
 
     if not self.editUtil.getBackgroundImage() or not self.editUtil.getLabelImage():
       return
@@ -226,13 +228,38 @@ class IsobrushEffectTool(LabelEffect.LabelEffectTool):
     backgroundLogic = sliceLogic.GetBackgroundLayer()
     backgroundLogic.GetReslice().Update()
     backgroundImage = backgroundLogic.GetReslice().GetOutputDataObject(0)
+    backgroundDimensions = backgroundImage.GetDimensions()
     self.shaderComputation.SetTextureImageData(backgroundImage)
 
     # make a result image to match dimensions and type
     resultImage = vtk.vtkImageData()
-    resultImage.SetDimensions(backgroundImage.GetDimensions())
+    resultImage.SetDimensions(backgroundDimensions)
     resultImage.AllocateScalars(vtk.VTK_UNSIGNED_CHAR, 4)
     self.shaderComputation.SetResultImageData(resultImage)
+
+    referenceX = xy[0] / float(backgroundDimensions[0])
+    referenceY = xy[1] / float(backgroundDimensions[1])
+    self.shaderComputation.SetFragmentShaderSource("""
+      #version 120
+      varying vec3 interpolatedTextureCoordinate;
+      uniform sampler3D volumeSampler;
+      void main()
+      {
+        vec3 referenceTextureCoordinate = vec3(%(referenceX)f, %(referenceY)f, .5);
+        vec3 samplePoint = interpolatedTextureCoordinate;
+        vec4 referenceSample = 500. * texture3D(volumeSampler, referenceTextureCoordinate);
+        vec4 volumeSample = 500. * texture3D(volumeSampler, interpolatedTextureCoordinate);
+        volumeSample = 10. * (referenceSample - volumeSample);
+        volumeSample.r = .2 * sin(10. * interpolatedTextureCoordinate.s);
+        volumeSample.b = .2 * cos(10. * interpolatedTextureCoordinate.t);
+        volumeSample.a = 0.3;
+        gl_FragColor = volumeSample;
+      }
+    """ % {
+        'referenceX' : referenceX,
+        'referenceY' : referenceY,
+        }
+    )
 
     self.shaderComputation.Compute()
 

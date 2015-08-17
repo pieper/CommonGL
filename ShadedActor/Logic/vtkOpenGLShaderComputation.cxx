@@ -471,10 +471,10 @@ void vtkOpenGLShaderComputation::Compute()
                                1.0f, -1.0f, 0.0f
                         };
   GLuint planeVerticesSize = sizeof(GLfloat)*3*4;
-  GLfloat planeTextureCoordinates[] = { 0.0f, 1.0f,
-                                        0.0f, 0.0f,
-                                        1.0f, 0.0f,
-                                        1.0f, 1.0f
+  GLfloat planeTextureCoordinates[] = { 0.0f, 0.0f,
+                                        0.0f, 1.0f,
+                                        1.0f, 1.0f,
+                                        1.0f, 0.0f
                         };
   GLuint planeTextureCoordinatesSize = sizeof(GLfloat)*2*4;
 
@@ -501,7 +501,8 @@ void vtkOpenGLShaderComputation::Compute()
   glEnableVertexAttribArray ( textureCoordinatesLocation );
   glVertexAttribPointer ( textureCoordinatesLocation, 2, GL_FLOAT, GL_FALSE, 0, 0 );
 
-  // make sure the texture is bound and pass in the address of it
+  // make sure the texture is bound and pass in the address of it (use Texture unit 0)
+  glEnable(GL_TEXTURE_3D);
   glActiveTexture(GL_TEXTURE0);
   glBindTexture(GL_TEXTURE_3D, this->TextureID);
   GLuint volumeSamplerLocation = glGetUniformLocation(this->ProgramObject, "volumeSampler");

@@ -282,8 +282,6 @@ class ShaderComputationTest(ScriptedLoadableModuleTest):
     from vtkSlicerShadedActorModuleLogicPython import *
 
     shaderComputation=vtkOpenGLShaderComputation()
-    renderWindow = vtk.vtkRenderWindow()
-    shaderComputation.Initialize(renderWindow)
 
     shaderComputation.SetVertexShaderSource("""
       #version 120

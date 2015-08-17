@@ -515,7 +515,7 @@ void vtkOpenGLShaderComputation::Compute()
   //
   // Collect the results of the calculation back into the image data
   //
-  glReadPixels(0, 0, resultDimensions[0], resultDimensions[1], GL_BGRA, GL_UNSIGNED_BYTE, resultPixels);
+  glReadPixels(0, 0, resultDimensions[0], resultDimensions[1], GL_RGBA, GL_UNSIGNED_BYTE, resultPixels);
 
   vtkOpenGLCheckErrorMacro("after computing and reading back");
   //

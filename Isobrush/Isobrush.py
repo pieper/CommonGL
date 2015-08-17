@@ -204,6 +204,9 @@ class IsobrushEffectTool(LabelEffect.LabelEffectTool):
     """
     update draw feedback to follow slice node
     """
+    if not hasattr(self, "xyPoints"):
+      # ignore events during initialization
+      return
     sliceLogic = self.sliceWidget.sliceLogic()
     sliceNode = sliceLogic.GetSliceNode()
     rasToXY = vtk.vtkTransform()

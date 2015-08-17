@@ -24,9 +24,9 @@
 #include "vtkSlicerModuleLogic.h"
 
 #include "vtkImageData.h"
+#include "vtkRenderWindow.h"
 
 class vtkImageData;
-class vtkOpenGLRenderWindow;
 
 #include "vtkSlicerShadedActorModuleLogicExport.h"
 
@@ -42,7 +42,7 @@ public:
 
   // Description:
   // Loads the required extensions
-  void Initialize(vtkOpenGLRenderWindow *renderWindow);
+  void Initialize(vtkRenderWindow *renderWindow);
 
   // Description:
   // Rebuild the shader program if needed
@@ -83,6 +83,11 @@ public:
   vtkGetObjectMacro(ResultImageData, vtkImageData);
   vtkSetObjectMacro(ResultImageData, vtkImageData);
 
+  // Description:
+  // Used internally to manage OpenGL context and extensions
+  vtkGetObjectMacro(RenderWindow, vtkRenderWindow);
+  vtkSetObjectMacro(RenderWindow, vtkRenderWindow);
+
 protected:
   vtkOpenGLShaderComputation();
   ~vtkOpenGLShaderComputation();
@@ -104,6 +109,8 @@ private:
   vtkTypeUInt32 FramebufferID;
   vtkTypeUInt32 ColorRenderbufferID;
   vtkTypeUInt32 DepthRenderbufferID;
+
+  vtkRenderWindow *RenderWindow;
 };
 
 #endif

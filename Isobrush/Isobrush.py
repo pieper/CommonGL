@@ -147,8 +147,6 @@ class IsobrushEffectTool(LabelEffect.LabelEffectTool):
     #
     from vtkSlicerShadedActorModuleLogicPython import vtkOpenGLShaderComputation
     self.shaderComputation=vtkOpenGLShaderComputation()
-    renderWindow = vtk.vtkRenderWindow()
-    self.shaderComputation.Initialize(renderWindow)
 
     self.shaderComputation.SetVertexShaderSource("""
       #version 120

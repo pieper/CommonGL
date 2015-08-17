@@ -17,6 +17,7 @@
 #include "vtkDataArray.h"
 #include "vtkImageData.h"
 #include "vtkObjectFactory.h"
+#include "vtkOpenGLError.h"
 #include "vtkOpenGLExtensionManager.h"
 #include "vtkOpenGLRenderWindow.h"
 #include "vtkPointData.h"
@@ -41,6 +42,10 @@ vtkOpenGLShaderComputation::vtkOpenGLShaderComputation()
   this->ProgramObjectMTime = 0;
   this->TextureID = 0;
   this->TextureMTime = 0;
+
+  this->RenderWindow = vtkRenderWindow::New();
+  this->RenderWindow->SetOffScreenRendering(1);
+  this->Initialize(this->RenderWindow);
 }
 
 //----------------------------------------------------------------------------
@@ -55,6 +60,12 @@ vtkOpenGLShaderComputation::~vtkOpenGLShaderComputation()
     glDeleteProgram ( this->ProgramObject );
     this->ProgramObject = 0;
     }
+  if (this->TextureID > 0)
+    {
+    glDeleteTextures(1, &(this->TextureID));
+    this->TextureID = 0;
+    }
+  this->SetRenderWindow(NULL);
 }
 
 //----------------------------------------------------------------------------
@@ -96,6 +107,8 @@ static GLenum vtkScalarTypeToGLType(int vtk_scalar_type)
 //
 static GLuint CompileShader ( vtkOpenGLShaderComputation *self, GLenum type, const char *shaderSource )
 {
+  vtkOpenGLClearErrorMacro();
+
   GLuint shader;
   GLint compiled;
 
@@ -133,9 +146,11 @@ static GLuint CompileShader ( vtkOpenGLShaderComputation *self, GLenum type, con
       }
 
       glDeleteShader ( shader );
+      vtkOpenGLStaticCheckErrorMacro("after deleting bad shader");
       return 0;
-   }
-   return shader;
+    }
+  vtkOpenGLStaticCheckErrorMacro("after compiling shader");
+  return shader;
 }
 
 //----------------------------------------------------------------------------
@@ -143,6 +158,7 @@ static GLuint CompileShader ( vtkOpenGLShaderComputation *self, GLenum type, con
 //
 bool vtkOpenGLShaderComputation::UpdateProgram()
 {
+  vtkOpenGLClearErrorMacro();
   GLuint vertexShader;
   GLuint fragmentShader;
   GLint linked;
@@ -166,6 +182,7 @@ bool vtkOpenGLShaderComputation::UpdateProgram()
 
   if ( !vertexShader || !fragmentShader )
     {
+    vtkOpenGLCheckErrorMacro("after failed compile");
     return false;
     }
 
@@ -174,6 +191,7 @@ bool vtkOpenGLShaderComputation::UpdateProgram()
 
   if ( this->ProgramObject == 0 )
     {
+    vtkOpenGLCheckErrorMacro("after failed program create");
     return false;
     }
 
@@ -202,10 +220,12 @@ bool vtkOpenGLShaderComputation::UpdateProgram()
       }
 
     glDeleteProgram ( this->ProgramObject );
+    vtkOpenGLCheckErrorMacro("after failed program attachment");
     return false;
     }
 
   this->ProgramObjectMTime = this->GetMTime();
+  vtkOpenGLCheckErrorMacro("after program creation");
   return true;
 }
 
@@ -214,6 +234,7 @@ bool vtkOpenGLShaderComputation::UpdateProgram()
 //
 bool vtkOpenGLShaderComputation::UpdateTexture()
 {
+  vtkOpenGLClearErrorMacro();
   if (this->GetMTime() > this->TextureMTime)
     {
     if (this->TextureID != 0)
@@ -265,22 +286,32 @@ bool vtkOpenGLShaderComputation::UpdateTexture()
   );
 
   this->TextureMTime = this->GetMTime();
+  vtkOpenGLCheckErrorMacro("after texture update");
   return true;
 }
 
 //-----------------------------------------------------------------------------
-void vtkOpenGLShaderComputation::Initialize(vtkOpenGLRenderWindow *renderWindow)
+void vtkOpenGLShaderComputation::Initialize(vtkRenderWindow *renderWindow)
 {
   if (this->Initialized)
     {
     return;
     }
 
-  this->Initialized = true;
+  vtkOpenGLRenderWindow *openGLRenderWindow = vtkOpenGLRenderWindow::SafeDownCast(renderWindow);
+  if (!openGLRenderWindow)
+    {
+    vtkErrorMacro("Bad render window");
+    return;
+    }
 
   // load required extensions
-  vtkOpenGLExtensionManager *extensions = renderWindow->GetExtensionManager();
+  vtkOpenGLClearErrorMacro();
+  vtkOpenGLExtensionManager *extensions = openGLRenderWindow->GetExtensionManager();
   extensions->LoadExtension("GL_ARB_framebuffer_object");
+  vtkOpenGLCheckErrorMacro("after extension load");
+
+  this->Initialized = true;
 }
 
 
@@ -294,6 +325,8 @@ bool vtkOpenGLShaderComputation::AcquireFramebuffer()
 
   int resultDimensions[3];
   this->ResultImageData->GetDimensions(resultDimensions);
+
+  vtkOpenGLClearErrorMacro();
 
   //
   // generate and bind our Framebuffer
@@ -337,6 +370,7 @@ bool vtkOpenGLShaderComputation::AcquireFramebuffer()
     case vtkgl::FRAMEBUFFER_COMPLETE:
       break;
     default:
+      vtkOpenGLCheckErrorMacro("after bad framebuffer status");
       vtkErrorMacro("Bad framebuffer configuration, status is: " << status);
       return false;
     }
@@ -361,18 +395,21 @@ bool vtkOpenGLShaderComputation::AcquireFramebuffer()
   glDisable(GL_BLEND);
   glEnable(GL_DEPTH_TEST);
 
+  vtkOpenGLCheckErrorMacro("after framebuffer acquisition");
   return true;
 }
 
 //----------------------------------------------------------------------------
 void vtkOpenGLShaderComputation::ReleaseFramebuffer()
 {
+  vtkOpenGLClearErrorMacro();
   //Delete temp resources
   vtkgl::DeleteRenderbuffers(1, &(this->ColorRenderbufferID));
   vtkgl::DeleteRenderbuffers(1, &(this->DepthRenderbufferID));
   //Bind 0, which means render to back buffer, as a result, this->FramebufferID is unbound
   vtkgl::BindFramebuffer(vtkgl::FRAMEBUFFER, 0);
   vtkgl::DeleteFramebuffers(1, &(this->FramebufferID));
+  vtkOpenGLCheckErrorMacro("after framebuffer release");
 }
 
 //----------------------------------------------------------------------------
@@ -406,6 +443,9 @@ void vtkOpenGLShaderComputation::Compute()
   vtkDataArray *scalars = pointData->GetScalars();
   void *resultPixels = scalars->GetVoidPointer(0);
 
+  // ensure that all our OpenGL calls go to the correct context
+  this->RenderWindow->MakeCurrent();
+
   if (!this->AcquireFramebuffer()) // TODO: should re-use the framebuffer for efficiency
     {
     vtkErrorMacro("Could not set up a framebuffer.");
@@ -438,6 +478,7 @@ void vtkOpenGLShaderComputation::Compute()
                         };
   GLuint planeTextureCoordinatesSize = sizeof(GLfloat)*2*4;
 
+  vtkOpenGLClearErrorMacro();
   // Use the program object
   glUseProgram ( this->ProgramObject );
 
@@ -476,6 +517,7 @@ void vtkOpenGLShaderComputation::Compute()
   //
   glReadPixels(0, 0, resultDimensions[0], resultDimensions[1], GL_BGRA, GL_UNSIGNED_BYTE, resultPixels);
 
+  vtkOpenGLCheckErrorMacro("after computing and reading back");
   //
   // Don't use the program or the framebuffer anymore
   //

@@ -318,11 +318,13 @@ class ShaderComputationTest(ScriptedLoadableModuleTest):
       uniform sampler3D volumeSampler;
       void main()
       {
+      /*
         gl_FragColor = vec4 ( 1.0, 0.0, 0.0, 1.0 );
         gl_FragColor = interpolatedColor;
         vec4 volumeSample = texture3D(volumeSampler, interpolatedTextureCoordinate);
         volumeSample *= 100;
         gl_FragColor = mix( volumeSample, interpolatedColor, 0.5);
+      */
         
         vec4 integratedRay = vec4(0.);
         for (int i = 0; i < 256; i++) {
@@ -330,7 +332,6 @@ class ShaderComputationTest(ScriptedLoadableModuleTest):
           vec4 volumeSample = texture3D(volumeSampler, samplePoint);
           integratedRay += volumeSample;
         }
-        gl_FragColor = mix( interpolatedColor, integratedRay, 0.5);
         gl_FragColor = integratedRay;
       }
     """)

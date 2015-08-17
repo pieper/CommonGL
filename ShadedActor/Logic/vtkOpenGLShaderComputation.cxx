@@ -288,7 +288,7 @@ void vtkOpenGLShaderComputation::Initialize(vtkRenderer *renderer)
 bool vtkOpenGLShaderComputation::SetupFramebuffer()
 {
   //
-  // adapted from 
+  // adapted from
   // https://www.opengl.org/wiki/Framebuffer_Object_Examples
   //
 
@@ -308,23 +308,23 @@ bool vtkOpenGLShaderComputation::SetupFramebuffer()
   //
   vtkgl::GenRenderbuffers(1, &(this->ColorRenderbufferID));
   vtkgl::BindRenderbuffer(vtkgl::RENDERBUFFER, this->ColorRenderbufferID);
-  vtkgl::RenderbufferStorage(vtkgl::RENDERBUFFER, GL_RGBA8, 
+  vtkgl::RenderbufferStorage(vtkgl::RENDERBUFFER, GL_RGBA8,
                            resultDimensions[0], resultDimensions[1]);
-  vtkgl::FramebufferRenderbuffer(vtkgl::FRAMEBUFFER, 
-                               vtkgl::COLOR_ATTACHMENT0, 
-                               vtkgl::RENDERBUFFER, 
+  vtkgl::FramebufferRenderbuffer(vtkgl::FRAMEBUFFER,
+                               vtkgl::COLOR_ATTACHMENT0,
+                               vtkgl::RENDERBUFFER,
                                this->ColorRenderbufferID);
- 
+
   //
   // Now do the same for the depth buffer
   //
   vtkgl::GenRenderbuffers(1, &(this->DepthRenderbufferID));
   vtkgl::BindRenderbuffer(vtkgl::RENDERBUFFER, this->DepthRenderbufferID);
-  vtkgl::RenderbufferStorage(vtkgl::RENDERBUFFER, GL_DEPTH_COMPONENT24, 
+  vtkgl::RenderbufferStorage(vtkgl::RENDERBUFFER, GL_DEPTH_COMPONENT24,
                            resultDimensions[0], resultDimensions[1]);
-  vtkgl::FramebufferRenderbuffer(vtkgl::FRAMEBUFFER, 
-                               vtkgl::DEPTH_ATTACHMENT, 
-                               vtkgl::RENDERBUFFER, 
+  vtkgl::FramebufferRenderbuffer(vtkgl::FRAMEBUFFER,
+                               vtkgl::DEPTH_ATTACHMENT,
+                               vtkgl::RENDERBUFFER,
                                this->DepthRenderbufferID);
 
   //
@@ -354,14 +354,25 @@ bool vtkOpenGLShaderComputation::SetupFramebuffer()
   glViewport(0, 0, resultDimensions[0], resultDimensions[1]);
   glMatrixMode(GL_PROJECTION);
   glLoadIdentity();
-  glOrtho(0.0, resultDimensions[0], 0.0, resultDimensions[1], -1.0, 1.0); 
+  glOrtho(0.0, resultDimensions[0], 0.0, resultDimensions[1], -1.0, 1.0);
   glMatrixMode(GL_MODELVIEW);
   glLoadIdentity();
   glDisable(GL_TEXTURE_2D);
   glDisable(GL_BLEND);
   glEnable(GL_DEPTH_TEST);
- 
+
   return true;
+}
+
+//----------------------------------------------------------------------------
+void vtkOpenGLShaderComputation::ReleaseFramebuffer()
+{
+  //Delete temp resources
+  vtkgl::DeleteRenderbuffers(1, &(this->ColorRenderbufferID));
+  vtkgl::DeleteRenderbuffers(1, &(this->DepthRenderbufferID));
+  //Bind 0, which means render to back buffer, as a result, this->FramebufferID is unbound
+  vtkgl::BindFramebuffer(vtkgl::FRAMEBUFFER, 0);
+  vtkgl::DeleteFramebuffers(1, &(this->FramebufferID));
 }
 
 //----------------------------------------------------------------------------
@@ -377,76 +388,79 @@ void vtkOpenGLShaderComputation::Compute()
     return;
     }
 
-  if (this->ResultImageData == NULL 
-      || 
+  // check and set up the result area
+  if (this->ResultImageData == NULL
+      ||
       this->ResultImageData->GetPointData() == NULL
-      || 
+      ||
       this->ResultImageData->GetPointData()->GetScalars() == NULL
-      || 
+      ||
       this->ResultImageData->GetPointData()->GetScalars()->GetVoidPointer(0) == NULL)
     {
     vtkErrorMacro("Result image data is not correctly set up.");
     return;
     }
-
   int resultDimensions[3];
   this->ResultImageData->GetDimensions(resultDimensions);
   vtkPointData *pointData = this->ResultImageData->GetPointData();
   vtkDataArray *scalars = pointData->GetScalars();
   void *resultPixels = scalars->GetVoidPointer(0);
 
-  if (!this->SetupFramebuffer())
+  if (!this->SetupFramebuffer()) // TODO: should re-use the framebuffer for efficiency
     {
     vtkErrorMacro("Could not set up a framebuffer.");
     return;
     }
 
+  // Configure the program and the input data
   if (!this->UpdateProgram())
     {
     vtkErrorMacro("Could not update shader program.");
     return;
     }
-
   if (!this->UpdateTexture())
     {
     vtkErrorMacro("Could not update texture.");
     return;
     }
 
-
-
+  // define a normalized computing surface
   GLfloat planeVertices[] = { -1.0f, -1.0f, 0.0f,
                               -1.0f,  1.0f, 0.0f,
                                1.0f,  1.0f, 0.0f,
                                1.0f, -1.0f, 0.0f
                         };
+  GLuint planeVerticesSize = sizeof(GLfloat)*3*4;
   GLfloat planeTextureCoordinates[] = { 0.0f, 1.0f,
                                         0.0f, 0.0f,
                                         1.0f, 0.0f,
                                         1.0f, 1.0f
                         };
+  GLuint planeTextureCoordinatesSize = sizeof(GLfloat)*2*4;
 
   // Use the program object
   glUseProgram ( this->ProgramObject );
 
-  // Vertices in a buffer
+  // put vertices in a buffer and make it available to the program
   GLuint vertexLocation = glGetAttribLocation(this->ProgramObject, "vertexAttribute");
   GLuint planeVerticesBuffer;
   glGenBuffers(1, &planeVerticesBuffer);
   glBindBuffer(GL_ARRAY_BUFFER, planeVerticesBuffer);
-  glBufferData(GL_ARRAY_BUFFER, sizeof(GLfloat)*3*4, planeVertices, GL_STATIC_DRAW);
+  glBufferData(GL_ARRAY_BUFFER, planeVerticesSize, planeVertices, GL_STATIC_DRAW);
   glEnableVertexAttribArray ( vertexLocation );
   glVertexAttribPointer ( vertexLocation, 3, GL_FLOAT, GL_FALSE, 0, 0 );
 
   // texture coordinates in a buffer
-  GLuint textureCoordinatesLocation = glGetAttribLocation(this->ProgramObject, "textureCoordinateAttribute");
+  GLuint textureCoordinatesLocation = glGetAttribLocation(this->ProgramObject,
+                                                          "textureCoordinateAttribute");
   GLuint textureCoordinatesBuffer;
   glGenBuffers(1, &textureCoordinatesBuffer);
   glBindBuffer(GL_ARRAY_BUFFER, textureCoordinatesBuffer);
-  glBufferData(GL_ARRAY_BUFFER, sizeof(GLfloat)*2*4, planeTextureCoordinates, GL_STATIC_DRAW);
+  glBufferData(GL_ARRAY_BUFFER, planeTextureCoordinatesSize, planeTextureCoordinates, GL_STATIC_DRAW);
   glEnableVertexAttribArray ( textureCoordinatesLocation );
   glVertexAttribPointer ( textureCoordinatesLocation, 2, GL_FLOAT, GL_FALSE, 0, 0 );
 
+  // make sure the texture is bound and pass in the address of it
   glActiveTexture(GL_TEXTURE0);
   glBindTexture(GL_TEXTURE_3D, this->TextureID);
   GLuint volumeSamplerLocation = glGetUniformLocation(this->ProgramObject, "volumeSampler");
@@ -456,27 +470,24 @@ void vtkOpenGLShaderComputation::Compute()
   // GO!
   //
   glDrawArrays ( GL_QUADS, 0, 4 );
- 
+
   //
-  // Collect the results of the calculation
+  // Collect the results of the calculation back into the image data
   //
   glReadPixels(0, 0, resultDimensions[0], resultDimensions[1], GL_BGRA, GL_UNSIGNED_BYTE, resultPixels);
 
-  // Don't use the program anymore
+  //
+  // Don't use the program or the framebuffer anymore
+  //
   glUseProgram ( 0 );
-
-  //Delete temp resources
-  vtkgl::DeleteRenderbuffers(1, &(this->ColorRenderbufferID));
-  vtkgl::DeleteRenderbuffers(1, &(this->DepthRenderbufferID));
-  //Bind 0, which means render to back buffer, as a result, this->FramebufferID is unbound
-  vtkgl::BindFramebuffer(vtkgl::FRAMEBUFFER, 0);
-  vtkgl::DeleteFramebuffers(1, &(this->FramebufferID));
-
+  this->ReleaseFramebuffer();
 }
 
 //----------------------------------------------------------------------------
 void vtkOpenGLShaderComputation::PrintSelf(ostream& os, vtkIndent indent)
 {
+  this->Superclass::PrintSelf(os,indent);
+  os << indent << "Initialized: " << this->Initialized << "\n";
   if ( this->VertexShaderSource )
     {
     os << indent << "VertexShaderSource: " << this->VertexShaderSource << "\n";
@@ -501,10 +512,19 @@ void vtkOpenGLShaderComputation::PrintSelf(ostream& os, vtkIndent indent)
     {
     os << indent << "TextureImageData: (none)\n";
     }
+  if ( this->ResultImageData )
+    {
+    os << indent << "ResultImageData: " << this->ResultImageData << "\n";
+    }
+  else
+    {
+    os << indent << "ResultImageData: (none)\n";
+    }
   os << indent << "ProgramObject: " << this->ProgramObject << "\n";
   os << indent << "ProgramObjectMTime: " << this->ProgramObjectMTime << "\n";
   os << indent << "TextureID: " << this->TextureID << "\n";
   os << indent << "TextureMTime: " << this->TextureMTime << "\n";
-
-  this->Superclass::PrintSelf(os,indent);
+  os << indent << "FramebufferID: " << this->FramebufferID << "\n";
+  os << indent << "ColorRenderbufferID: " << this->ColorRenderbufferID << "\n";
+  os << indent << "DepthRenderbufferID: " << this->DepthRenderbufferID << "\n";
 }

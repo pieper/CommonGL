@@ -285,7 +285,7 @@ void vtkOpenGLShaderComputation::Initialize(vtkRenderer *renderer)
 
 
 //-----------------------------------------------------------------------------
-bool vtkOpenGLShaderComputation::SetupFramebuffer()
+bool vtkOpenGLShaderComputation::AcquireFramebuffer()
 {
   //
   // adapted from
@@ -406,7 +406,7 @@ void vtkOpenGLShaderComputation::Compute()
   vtkDataArray *scalars = pointData->GetScalars();
   void *resultPixels = scalars->GetVoidPointer(0);
 
-  if (!this->SetupFramebuffer()) // TODO: should re-use the framebuffer for efficiency
+  if (!this->AcquireFramebuffer()) // TODO: should re-use the framebuffer for efficiency
     {
     vtkErrorMacro("Could not set up a framebuffer.");
     return;

@@ -34,7 +34,7 @@ class vtkRenderer;
 class VTK_SLICER_SHADEDACTOR_MODULE_LOGIC_EXPORT vtkOpenGLShaderComputation : public vtkObject
 {
 protected:
-  
+
 public:
   static vtkOpenGLShaderComputation *New();
   vtkTypeMacro(vtkOpenGLShaderComputation,vtkObject);
@@ -53,14 +53,15 @@ public:
   bool UpdateTexture();
 
   // Description:
-  // Setup target for rendering result
-  bool SetupFramebuffer();
+  // Manage the OpenGL offscreen rendering framebuffer for computing
+  bool AcquireFramebuffer();
+  void ReleaseFramebuffer();
 
   // Description:
   // Perform the actual computation
   // Updates the texture and program if needed and then
   // renders a quadrilateral of to a renderbuffer the size
-  // of the ResultImageData and uses the program 
+  // of the ResultImageData and uses the program
   // to perform the shading.
   void Compute();
 

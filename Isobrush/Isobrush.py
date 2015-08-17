@@ -10,7 +10,6 @@ from EditorLib.EditOptions import EditOptions
 from EditorLib import EditUtil
 from EditorLib import LabelEffect
 
-
 #
 # IsobrushEffectOptions - see LabelEffect, EditOptions and Effect for superclasses
 #
@@ -41,6 +40,7 @@ class IsobrushEffectOptions(EditorLib.LabelEffectOptions):
     self.apply.setToolTip("Apply the extension operation")
     self.frame.layout().addWidget(self.apply)
     self.widgets.append(self.apply)
+    self.connections.append( (self.apply, 'clicked()', self.onApply) )
 
     if self.developerMode:
       self.reload = qt.QPushButton("Reload", self.frame)
@@ -50,9 +50,7 @@ class IsobrushEffectOptions(EditorLib.LabelEffectOptions):
       self.widgets.append(self.reload)
       self.connections.append( (self.reload, 'clicked()', self.onReload) )
 
-    HelpButton(self.frame, "As of yet, this is a sample with no real functionality.")
-
-    self.connections.append( (self.apply, 'clicked()', self.onApply) )
+    HelpButton(self.frame, "This is a fancy paint brush.")
 
     # Add vertical spacer
     self.frame.layout().addStretch(1)
@@ -85,6 +83,7 @@ class IsobrushEffectOptions(EditorLib.LabelEffectOptions):
   def onReload(self):
     EditUtil.EditUtil().setCurrentEffect("DefaultTool")
     import Isobrush
+    # TODO: this causes a flash of the new widget, but not a big deal since it's only devel mode
     w = Isobrush.IsobrushWidget()
     w.onReload()
     del(w.parent)
@@ -120,23 +119,63 @@ class IsobrushEffectTool(LabelEffect.LabelEffectTool):
     # create a logic instance to do the non-gui work
     self.logic = IsobrushEffectLogic(self.sliceWidget.sliceLogic())
 
-    # interaction state variables
+    # interaction state variables - track if painting or not
     self.actionState = None
 
-    # initialization
-    self.xyPoints = vtk.vtkPoints()
-    self.rasPoints = vtk.vtkPoints()
-    self.polyData = self.createPolyData()
+    #
+    # cursor actor (paint preview)
+    #
+    self.cursorMapper = vtk.vtkImageMapper()
+    self.cursorDummyImage = vtk.vtkImageData()
+    self.cursorDummyImage.AllocateScalars(vtk.VTK_UNSIGNED_INT, 1)
+    self.cursorMapper.SetInputData( self.cursorDummyImage )
+    self.cursorActor = vtk.vtkActor2D()
+    self.cursorActor.VisibilityOff()
+    self.cursorActor.SetMapper( self.cursorMapper )
+    self.cursorMapper.SetColorWindow( 255 )
+    self.cursorMapper.SetColorLevel( 128 )
 
-    self.mapper = vtk.vtkPolyDataMapper2D()
-    self.actor = vtk.vtkActor2D()
-    self.mapper.SetInputData(self.polyData)
-    self.actor.SetMapper(self.mapper)
-    property_ = self.actor.GetProperty()
-    property_.SetColor(1,1,0)
-    property_.SetLineWidth(1)
-    self.renderer.AddActor2D( self.actor )
-    self.actors.append( self.actor )
+    self.actors.append( self.cursorActor )
+
+    self.renderer.AddActor2D( self.cursorActor )
+
+    #
+    # Shader computation
+    # - need to import module here since it may not be in sys.path
+    #   at startup time
+    # - uses dummy render window for framebuffer object context
+    #
+    from vtkSlicerShadedActorModuleLogicPython import vtkOpenGLShaderComputation
+    self.shaderComputation=vtkOpenGLShaderComputation()
+    renderWindow = vtk.vtkRenderWindow()
+    self.shaderComputation.Initialize(renderWindow)
+
+    self.shaderComputation.SetVertexShaderSource("""
+      #version 120
+      attribute vec3 vertexAttribute;
+      attribute vec2 textureCoordinateAttribute;
+      varying vec3 interpolatedTextureCoordinate;
+      void main()
+      {
+        interpolatedTextureCoordinate = vec3(textureCoordinateAttribute, .5);
+        gl_Position = vec4(vertexAttribute, 1.);
+      }
+    """)
+
+    self.shaderComputation.SetFragmentShaderSource("""
+      #version 120
+      varying vec3 interpolatedTextureCoordinate;
+      uniform sampler3D volumeSampler;
+      void main()
+      {
+        vec3 samplePoint = interpolatedTextureCoordinate;
+        samplePoint.y = 1. - samplePoint.y;
+        vec4 volumeSample = texture3D(volumeSampler, interpolatedTextureCoordinate);
+        volumeSample.r = 0.9;
+        volumeSample.a = 0.4;
+        gl_FragColor = volumeSample;
+      }
+    """)
 
     self.initialized = True
 
@@ -154,6 +193,7 @@ class IsobrushEffectTool(LabelEffect.LabelEffectTool):
 
     if event == "LeftButtonPressEvent":
       self.actionState = "painting"
+      self.previewOn()
       self.abortEvent(event)
     if event == "MouseMoveEvent":
       xy = self.interactor.GetEventPosition()
@@ -162,6 +202,7 @@ class IsobrushEffectTool(LabelEffect.LabelEffectTool):
       else:
         self.createIsocurve(xy)
     if event == "LeftButtonReleaseEvent":
+      self.previewOff()
       self.applyIsocurve()
       self.actionState = None
       self.abortEvent(event)
@@ -174,7 +215,36 @@ class IsobrushEffectTool(LabelEffect.LabelEffectTool):
       # to the view
       pass
 
-    self.positionActors()
+  def previewOn(self):
+
+    if not self.editUtil.getBackgroundImage() or not self.editUtil.getLabelImage():
+      return
+
+    #
+    # get the visible section of the background (pre-window/level)
+    # to use as input to the shader code
+    #
+    sliceLogic = self.sliceWidget.sliceLogic()
+    backgroundLogic = sliceLogic.GetBackgroundLayer()
+    backgroundLogic.GetReslice().Update()
+    backgroundImage = backgroundLogic.GetReslice().GetOutputDataObject(0)
+    self.shaderComputation.SetTextureImageData(backgroundImage)
+
+    # make a result image to match dimensions and type
+    resultImage = vtk.vtkImageData()
+    resultImage.SetDimensions(backgroundImage.GetDimensions())
+    resultImage.AllocateScalars(vtk.VTK_UNSIGNED_CHAR, 4)
+    self.shaderComputation.SetResultImageData(resultImage)
+
+    self.shaderComputation.Compute()
+
+    self.cursorMapper.SetInputDataObject(resultImage)
+    self.cursorActor.VisibilityOn()
+    self.sliceView.scheduleRender()
+
+  def previewOff(self):
+    self.cursorActor.VisibilityOff()
+    self.sliceView.scheduleRender()
 
   def createIsocurve(self, xy):
     print('create', xy)
@@ -182,92 +252,12 @@ class IsobrushEffectTool(LabelEffect.LabelEffectTool):
     backgroundLogic = sliceLogic.GetBackgroundLayer()
     print(backgroundLogic.GetReslice().GetOutput().GetDimensions())
 
-    # TODO: generate a radiating ring of points in xy space that have
-    # similar intensities to the value at xy (use addPoint after 
-    # mapping them to RAS).  Need a radius in xy space to search in (maybe
-    # re-use paint radius? or make it a fraction of Dimensions?)
-
   def updateIsocurve(self, xy):
     print('update', xy)
-    # TODO: look at all the current points and if any are closer than radius
-    # look at moving them out, depending on same criteria use to create them.
-    # Afterwards do a pass and if there are any points that are too far apart
-    # split them and then re-radiate them from xy.
-    # Splitting step may require making a copy of the points, resetting,
-    # and adding new points.
 
   def applyIsocurve(self):
     print('apply')
     # TODO: should be normal apply operation using ras points
-
-  def positionActors(self):
-    """
-    update draw feedback to follow slice node
-    """
-    sliceLogic = self.sliceWidget.sliceLogic()
-    sliceNode = sliceLogic.GetSliceNode()
-    rasToXY = vtk.vtkTransform()
-    rasToXY.SetMatrix( sliceNode.GetXYToRAS() )
-    rasToXY.Inverse()
-    self.xyPoints.Reset()
-    rasToXY.TransformPoints( self.rasPoints, self.xyPoints )
-    self.polyData.Modified()
-    self.sliceView.scheduleRender()
-
-  def createPolyData(self):
-    """make an empty single-polyline polydata"""
-
-    polyData = vtk.vtkPolyData()
-    polyData.SetPoints(self.xyPoints)
-
-    lines = vtk.vtkCellArray()
-    polyData.SetLines(lines)
-    idArray = lines.GetData()
-    idArray.Reset()
-    idArray.InsertNextTuple1(0)
-
-    polygons = vtk.vtkCellArray()
-    polyData.SetPolys(polygons)
-    idArray = polygons.GetData()
-    idArray.Reset()
-    idArray.InsertNextTuple1(0)
-
-    return polyData
-
-  def resetPolyData(self):
-    """return the polyline to initial state with no points"""
-    lines = self.polyData.GetLines()
-    idArray = lines.GetData()
-    idArray.Reset()
-    idArray.InsertNextTuple1(0)
-    self.xyPoints.Reset()
-    self.rasPoints.Reset()
-    lines.SetNumberOfCells(0)
-    self.activeSlice = None
-
-  def addPoint(self,ras):
-    """add a world space point to the current outline"""
-    # store active slice when first point is added
-    sliceLogic = self.sliceWidget.sliceLogic()
-    currentSlice = sliceLogic.GetSliceOffset()
-    if not self.activeSlice:
-      self.activeSlice = currentSlice
-      self.setLineMode("solid")
-
-    # don't allow adding points on except on the active slice (where
-    # first point was laid down)
-    if self.activeSlice != currentSlice: return
-
-    # keep track of node state (in case of pan/zoom)
-    sliceNode = sliceLogic.GetSliceNode()
-    self.lastInsertSliceNodeMTime = sliceNode.GetMTime()
-
-    p = self.rasPoints.InsertNextPoint(ras)
-    lines = self.polyData.GetLines()
-    idArray = lines.GetData()
-    idArray.InsertNextTuple1(p)
-    idArray.SetTuple1(0, idArray.GetNumberOfTuples()-1)
-    lines.SetNumberOfCells(1)
 
 
 #

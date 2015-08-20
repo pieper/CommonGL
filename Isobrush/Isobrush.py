@@ -115,6 +115,7 @@ class IsobrushEffectTool(LabelEffect.LabelEffectTool):
   """
 
   def __init__(self, sliceWidget):
+    self.initialized = False
     super(IsobrushEffectTool,self).__init__(sliceWidget)
     # create a logic instance to do the non-gui work
     self.logic = IsobrushEffectLogic(self.sliceWidget.sliceLogic())
@@ -160,21 +161,6 @@ class IsobrushEffectTool(LabelEffect.LabelEffectTool):
       }
     """)
 
-    self.shaderComputation.SetFragmentShaderSource("""
-      #version 120
-      varying vec3 interpolatedTextureCoordinate;
-      uniform sampler3D volumeSampler;
-      void main()
-      {
-        vec3 samplePoint = interpolatedTextureCoordinate;
-        vec4 volumeSample = 500. * texture3D(volumeSampler, interpolatedTextureCoordinate);
-        volumeSample.g = sin(10. * interpolatedTextureCoordinate.s);
-        volumeSample.b = cos(10. * interpolatedTextureCoordinate.t);
-        volumeSample.a = 0.9;
-        gl_FragColor = volumeSample;
-      }
-    """)
-
     self.initialized = True
 
     self.previewOn()
@@ -186,10 +172,16 @@ class IsobrushEffectTool(LabelEffect.LabelEffectTool):
     """
     handle events from the render window interactor
     """
+    if not self.initialized:
+      return
 
     # let the superclass deal with the event if it wants to
-    if super(IsobrushEffectTool,self).processEvent(caller,event):
-      return
+    try:
+      if super(IsobrushEffectTool,self).processEvent(caller,event):
+        return
+    except TypeError:
+      # this can happen when an event comes in during destruction of the object
+      pass
 
     if event == "LeftButtonPressEvent":
       self.actionState = "painting"
@@ -214,6 +206,7 @@ class IsobrushEffectTool(LabelEffect.LabelEffectTool):
       # here you can respond to pan/zoom or other changes
       # to the view
       pass
+      self.previewOn()
 
   def previewOn(self, xy=(100,100)):
 
@@ -249,15 +242,17 @@ class IsobrushEffectTool(LabelEffect.LabelEffectTool):
         vec3 samplePoint = interpolatedTextureCoordinate;
         vec4 referenceSample = 500. * texture3D(volumeSampler, referenceTextureCoordinate);
         vec4 volumeSample = 500. * texture3D(volumeSampler, interpolatedTextureCoordinate);
-        volumeSample = 10. * (referenceSample - volumeSample);
-        volumeSample.r = .2 * sin(10. * interpolatedTextureCoordinate.s);
-        volumeSample.b = .2 * cos(10. * interpolatedTextureCoordinate.t);
-        volumeSample.a = 0.3;
-        gl_FragColor = volumeSample;
+        gl_FragColor = vec4(0.);
+        if (distance(referenceTextureCoordinate, interpolatedTextureCoordinate) < %(radius)f) {
+          if ((referenceSample.r - volumeSample.r) > 0.) {
+            gl_FragColor = vec4(1., 1., 0., .5);
+          }
+        }
       }
     """ % {
         'referenceX' : referenceX,
         'referenceY' : referenceY,
+        'radius'     : 0.1,
         }
     )
 
@@ -265,20 +260,21 @@ class IsobrushEffectTool(LabelEffect.LabelEffectTool):
 
     self.cursorMapper.SetInputDataObject(resultImage)
     self.cursorActor.VisibilityOn()
-    self.sliceView.scheduleRender()
+    self.sliceView.forceRender()
 
   def previewOff(self):
     self.cursorActor.VisibilityOff()
     self.sliceView.scheduleRender()
 
   def createIsocurve(self, xy):
-    print('create', xy)
+    # print('create', xy)
     sliceLogic = self.sliceWidget.sliceLogic()
     backgroundLogic = sliceLogic.GetBackgroundLayer()
-    print(backgroundLogic.GetReslice().GetOutput().GetDimensions())
+    # print(backgroundLogic.GetReslice().GetOutput().GetDimensions())
 
   def updateIsocurve(self, xy):
-    print('update', xy)
+    # print('update', xy)
+    pass
 
   def applyIsocurve(self):
     print('apply')

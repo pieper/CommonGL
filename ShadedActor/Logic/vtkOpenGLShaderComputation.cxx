@@ -235,7 +235,7 @@ bool vtkOpenGLShaderComputation::UpdateProgram()
 bool vtkOpenGLShaderComputation::UpdateTexture()
 {
   vtkOpenGLClearErrorMacro();
-  if (this->GetMTime() > this->TextureMTime)
+  if (this->TextureImageData->GetMTime() > this->TextureMTime)
     {
     if (this->TextureID != 0)
       {
@@ -285,7 +285,7 @@ bool vtkOpenGLShaderComputation::UpdateTexture()
                /* pixels */            pixels
   );
 
-  this->TextureMTime = this->GetMTime();
+  this->TextureMTime = this->TextureImageData->GetMTime();
   vtkOpenGLCheckErrorMacro("after texture update");
   return true;
 }
@@ -517,6 +517,7 @@ void vtkOpenGLShaderComputation::Compute()
   // Collect the results of the calculation back into the image data
   //
   glReadPixels(0, 0, resultDimensions[0], resultDimensions[1], GL_RGBA, GL_UNSIGNED_BYTE, resultPixels);
+  pointData->Modified();
 
   vtkOpenGLCheckErrorMacro("after computing and reading back");
   //

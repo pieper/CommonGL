@@ -251,7 +251,8 @@ class ShaderComputationTest(ScriptedLoadableModuleTest):
     """Run as few or as many tests as needed here.
     """
     self.setUp()
-    self.test_ShaderComputation1()
+    #self.test_ShaderComputation1()
+    self.test_ShaderComputation2()
 
   def test_ShaderComputation1(self):
     """ Ideally you should have several levels of tests.  At the lowest level
@@ -265,7 +266,7 @@ class ShaderComputationTest(ScriptedLoadableModuleTest):
     your test should break so they know that the feature is needed.
     """
 
-    self.delayDisplay("Starting the test", 100)
+    # self.delayDisplay("Starting the test", 100)
 
     mrHeadVolume = slicer.util.getNode('MRHead')
     if not mrHeadVolume:
@@ -311,7 +312,7 @@ class ShaderComputationTest(ScriptedLoadableModuleTest):
         volumeSample *= 100;
         gl_FragColor = mix( volumeSample, interpolatedColor, 0.5);
       */
-        
+
         vec4 integratedRay = vec4(0.);
         for (int i = 0; i < 256; i++) {
           vec3 samplePoint = vec3(interpolatedTextureCoordinate.st, i/256.);
@@ -338,3 +339,341 @@ class ShaderComputationTest(ScriptedLoadableModuleTest):
 
     slicer.modules.ShaderComputationWidget.iv = iv
 
+  def sampleVolumeParameters(self,volumeNode):
+    """Calculate the dictionary of substitutions for the
+    current state of the volume node in a form for
+    substitution into the sampleVolume shader function
+    TODO: this would probably be better as uniforms, but that
+    requires doing a lot of parsing and data management in C++
+    """
+
+    volumeArray = slicer.util.array(volumeNode.GetID())
+
+    rasToIJK = vtk.vtkMatrix4x4()
+    volumeNode.GetRASToIJKMatrix(rasToIJK)
+
+    transformNode = volumeNode.GetParentTransformNode()
+    if transformNode:
+      if transformNode.IsTransformToWorldLinear():
+        rasToRAS = vtk.vtkMatrix4x4()
+        transformNode.GetMatrixTransformToWorld(rasToRAS)
+        rasToRAS.Invert()
+        rasToRAS.Multiply4x4(rasToIJK, rasToRAS, rasToIJK)
+      else:
+        print('Cannot handle nonlinear transforms')
+
+    # TODO: adjust for normalized sampling
+    parameters = {}
+    rows = ('rasToS', 'rasToT', 'rasToP')
+    for row in range(3):
+      rowKey = rows[row]
+      parameters[rowKey] = ""
+      for col in range(4):
+        parameters[rowKey] += "%f," % rasToIJK.GetElement(row,col)
+      parameters[rowKey] = parameters[rowKey][:-1] # clear trailing comma
+    return parameters
+
+  def rayCastVolumeParameters(self,volumeNode):
+    """Calculate the dictionary of substitutions for the
+    current state of the volume node and camera in a form for
+    substitution into the rayCast shader function
+    TODO: this would probably be better as uniforms, but that
+    requires doing a lot of parsing and data management in C++
+    """
+
+    parameters = {}
+
+    rasBounds = [0,]*6
+    volumeNode.GetRASBounds(rasBounds)
+    parameters['rasBoxMin'] = "%f, %f, %f" % (rasBounds[0], rasBounds[2], rasBounds[4])
+    parameters['rasBoxMax'] = "%f, %f, %f" % (rasBounds[1], rasBounds[3], rasBounds[5])
+
+    # get the camera parameters from default 3D window
+    layoutManager = slicer.app.layoutManager()
+    threeDWidget = layoutManager.threeDWidget(0)
+    threeDView = threeDWidget.threeDView()
+    renderWindow = threeDView.renderWindow()
+    renderers = renderWindow.GetRenderers()
+    renderer = renderers.GetItemAsObject(0)
+    camera = renderer.GetActiveCamera()
+
+    import numpy
+    viewPosition = numpy.array(camera.GetPosition())
+    focalPoint = numpy.array(camera.GetFocalPoint())
+    viewDistance = numpy.linalg.norm(focalPoint - viewPosition)
+    viewNormal = (focalPoint - viewPosition) / viewDistance
+    viewUp = numpy.array(camera.GetViewUp())
+    viewAngle = camera.GetViewAngle()
+    viewRight = numpy.cross(viewNormal,viewUp)
+
+    parameters['eyeRayOrigin'] = "%f, %f, %f" % (viewPosition[0], viewPosition[1], viewPosition[2])
+    parameters['viewNormal'] = "%f, %f, %f" % (viewNormal[0], viewNormal[1], viewNormal[2])
+    parameters['viewRight'] = "%f, %f, %f" % (viewRight[0], viewRight[1], viewRight[2])
+    parameters['viewUp'] = "%f, %f, %f" % (viewUp[0], viewUp[1], viewUp[2])
+
+    return parameters
+
+  def test_ShaderComputation2(self, caller=None, event=None):
+    """ Ideally you should have several levels of tests.  At the lowest level
+    tests should exercise the functionality of the logic with different inputs
+    (both valid and invalid).  At higher levels your tests should emulate the
+    way the user would interact with your code and confirm that it still works
+    the way you intended.
+    One of the most important features of the tests is that it should alert other
+    developers when their changes will have an impact on the behavior of your
+    module.  For example, if a developer removes a feature that you depend on,
+    your test should break so they know that the feature is needed.
+    """
+
+    if False:
+      self.delayDisplay("Starting the test", 100)
+
+    volumeToRender = slicer.util.getNode('CTACardio')
+    if not volumeToRender:
+      import SampleData
+      sampleDataLogic = SampleData.SampleDataLogic()
+      print("Getting CTA Volume")
+      volumeToRender = sampleDataLogic.downloadCTACardio()
+
+    if not hasattr(self,"shaderComputation"):
+      from vtkSlicerShadedActorModuleLogicPython import vtkOpenGLShaderComputation
+      self.shaderComputation=vtkOpenGLShaderComputation()
+
+    # TODO: these strings can move to a CommonGL spot once debugged
+    headerSource = """
+      #version 120
+    """
+
+    self.shaderComputation.SetVertexShaderSource("""
+      %(header)s
+      attribute vec3 vertexAttribute;
+      attribute vec2 textureCoordinateAttribute;
+      varying vec3 interpolatedTextureCoordinate;
+      void main()
+      {
+        interpolatedTextureCoordinate = vec3(textureCoordinateAttribute, .5);
+        gl_Position = vec4(vertexAttribute, 1.);
+      }
+    """ % {
+      'header' : headerSource
+    })
+
+
+    intersectBoxSource = """
+      bool intersectBox(const in vec3 rayOrigin, const in vec3 rayDirection,
+                        const in vec3 boxMin, const in vec3 boxMax,
+                        out float tNear, out float tFar)
+        // intersect ray with a box
+        // http://www.siggraph.org/education/materials/HyperGraph/raytrace/rtinter3.htm
+      {
+          // compute intersection of ray with all six bbox planes
+          vec3 invRay = vec3(1.) / rayDirection;
+          vec3 tBot = invRay * (boxMin - rayOrigin);
+          vec3 tTop = invRay * (boxMax - rayOrigin);
+
+          // re-order intersections to find smallest and largest on each axis
+          vec3 tMin = min(tTop, tBot);
+          vec3 tMax = max(tTop, tBot);
+
+          // find the largest tMin and the smallest tMax
+          float largest_tMin = max(max(tMin.x, tMin.y), max(tMin.x, tMin.z));
+          float smallest_tMax = min(min(tMax.x, tMax.y), min(tMax.x, tMax.z));
+
+          tNear = largest_tMin;
+          tFar = smallest_tMax;
+
+          return smallest_tMax > largest_tMin;
+      }
+    """
+
+    sampleVolumeSource = """
+      void sampleVolume(in sampler3D volumeSampler, in vec3 samplePoint, in float gradientSize,
+                        out float sample, out vec3 normal, out float gradientMagnitude)
+      {
+        // vectors to map RAS to stp
+        vec4 rasToS =  vec4( %(rasToS)s );
+        vec4 rasToT =  vec4( %(rasToT)s );
+        vec4 rasToP =  vec4( %(rasToP)s );
+
+        vec3 stpPoint;
+        vec4 sampleCoordinate = vec4(samplePoint, 1.);
+        stpPoint.x = dot(rasToS,sampleCoordinate);
+        stpPoint.y = dot(rasToT,sampleCoordinate);
+        stpPoint.z = dot(rasToP,sampleCoordinate);
+
+        // read from 3D texture
+        sample = texture3D(volumeSampler, stpPoint).r;
+
+        // central difference sample gradient (N is -1)
+        float s100 = texture3D(volumeSampler, stpPoint + vec3(gradientSize,0,0)).r;
+        float sN00 = texture3D(volumeSampler, stpPoint - vec3(gradientSize,0,0)).r;
+        float s010 = texture3D(volumeSampler, stpPoint + vec3(0,gradientSize,0)).r;
+        float s0N0 = texture3D(volumeSampler, stpPoint - vec3(0,gradientSize,0)).r;
+        float s001 = texture3D(volumeSampler, stpPoint + vec3(0,0,gradientSize)).r;
+        float s00N = texture3D(volumeSampler, stpPoint - vec3(0,0,gradientSize)).r;
+
+        vec3 gradient = vec3( 0.5f*(s100-sN00),
+                              0.5f*(s010-s0N0),
+                              0.5f*(s001-s00N));
+        gradientMagnitude = length(gradient);
+        normal = normalize(gradient);
+      }
+    """ % self.sampleVolumeParameters(volumeToRender)
+
+    rayCastParameters = self.rayCastVolumeParameters(volumeToRender)
+    rayCastParameters.update({
+          'rayMaxSteps' : 50,
+          'rayStepSize' : 0.9,
+    }) # TODO: auto calculate ray parameters
+    rayCastSource = """
+      // volume ray caster - starts from the front and collects color and opacity
+      // contributions until fully saturated.
+      // Sample coordinate is 0->1 texture space
+      vec4 rayCast( in vec3 sampleCoordinate, in sampler3D volumeSampler )
+      {
+        // TODO aspect: float aspect = imageW / (1.0 * imageH);
+        vec2 normalizedCoordinate = 2. * (sampleCoordinate.st -.5);
+
+        // calculate eye ray in world space
+        vec3 eyeRayOrigin = vec3(%(eyeRayOrigin)s);
+        vec3 eyeRayDirection;
+
+        // ||viewNormal + u * viewRight + v * viewUp||
+
+        eyeRayDirection = normalize (                            vec3( %(viewNormal)s )
+                                      + normalizedCoordinate.x * vec3( %(viewRight)s  )
+                                      + normalizedCoordinate.y * vec3( %(viewUp)s     ) );
+
+
+        vec3 pointLight = vec3(250., 250., 400.); // TODO
+
+        // find intersection with box, possibly terminate early
+        float tNear, tFar;
+        vec3 rasBoxMin = vec3( %(rasBoxMin)s );
+        vec3 rasBoxMax = vec3( %(rasBoxMax)s );
+        bool hit = intersectBox( eyeRayOrigin, eyeRayDirection, rasBoxMin, rasBoxMax, tNear, tFar );
+        if (!hit) {
+          return vec4(0.,0.,.5,1.); // TODO: mid blue background for now
+        }
+
+        if (tNear < 0.) tNear = 0.;     // clamp to near plane
+
+        // march along ray from front, accumulating color and opacity
+        vec4 integratedPixel = vec4(0.);
+        float gradientSize = .05;
+        float tCurrent = tNear + gradientSize;
+        float sample;
+        int rayStep;
+        for(rayStep = 0; rayStep < %(rayMaxSteps)d; rayStep++) {
+
+          vec3 samplePoint = eyeRayOrigin + eyeRayDirection * tCurrent;
+
+          // TODO: add a vector field proportional to rayStep, u, v
+          /*
+          vec4 vectorField;
+          float blend = rayStep * 1000. / %(rayMaxSteps)d;
+          vectorField.x = blend * sin(90. * u) + cos(90. * v);
+          vectorField.y = blend * -cos(90. * u) + sin(90. * v);
+          vectorField.z = 0.;
+          //samplePoint += vectorField;
+          */
+
+          vec3 normal;
+          float gradientMagnitude;
+          sampleVolume(volumeSampler, samplePoint, gradientSize, sample, normal, gradientMagnitude);
+
+          // Phong lighting
+          // http://en.wikipedia.org/wiki/Phong_reflection_model
+          vec3 Cdiffuse = vec3(1.,1.,0.);
+          vec3 Cspecular = vec3(1.,1.,1.);
+          float Kdiffuse = 1.;
+          float Kspecular = .5;
+          float Shininess = 5.;
+
+          vec3 V = normalize(eyeRayOrigin - samplePoint);
+          vec3 L = normalize(pointLight - samplePoint);
+          vec3 R = normalize(2.*(dot(L,normal))*normal - L);
+          vec3 phongColor = vec3(0.);
+          phongColor = phongColor + Kdiffuse * dot(L,normal) * Cdiffuse;
+          phongColor = phongColor + Kspecular * pow( dot(R,V), Shininess ) * Cspecular;
+
+          vec4 color;
+          color = vec4(phongColor, 1.);
+          color.a = (1.*sample/100. + gradientMagnitude/.1) * %(rayStepSize)f*.01;
+          color.a = clamp( color.a, 0., 1. );
+
+          // accumulate result
+          float a = color.a * 1. /*density*/; // here w is alpha
+          vec4 newPixel = mix( integratedPixel, color, vec4(a) );
+          newPixel.a = integratedPixel.a + a;
+          integratedPixel = newPixel;
+
+          tCurrent += %(rayStepSize)f;
+          if (
+              tCurrent >= tFar - gradientSize // stepped out of the volume
+                ||
+              integratedPixel.a >= 1.  // pixel is saturated
+          ) {
+            break; // we can stop now
+          }
+        }
+        return (integratedPixel);
+      }
+    """ % rayCastParameters
+
+    self.shaderComputation.SetFragmentShaderSource("""
+      %(header)s
+      %(intersectBox)s
+      %(sampleVolume)s
+      %(rayCast)s
+
+      varying vec3 interpolatedTextureCoordinate;
+      uniform sampler3D volumeSampler;
+      void main()
+      {
+        gl_FragColor = rayCast(interpolatedTextureCoordinate, volumeSampler);
+      }
+    """ % {
+      'header' : headerSource,
+      'intersectBox' : intersectBoxSource,
+      'sampleVolume' : sampleVolumeSource,
+      'rayCast' : rayCastSource,
+    })
+
+    if False:
+      print(self.shaderComputation.GetFragmentShaderSource())
+      fp = open('/tmp/shader.glsl','w')
+      fp.write(self.shaderComputation.GetFragmentShaderSource())
+      fp.close()
+
+    self.shaderComputation.SetTextureImageData(volumeToRender.GetImageData())
+
+    resultImage = vtk.vtkImageData()
+    resultImage.SetDimensions(512, 512, 1)
+    resultImage.AllocateScalars(vtk.VTK_UNSIGNED_CHAR, 4)
+    self.shaderComputation.SetResultImageData(resultImage)
+
+    self.shaderComputation.Compute()
+
+    # TODO:
+    """
+    - refactor test to support re-use of self.shaderComputation
+    - fix vtkOpenGLShaderComputation to set MTime of resultImage (point data and image data)
+    - test render performance
+    - debug raycaster
+    - add features!
+    """
+
+    if not hasattr(self, "iv"):
+      self.iv = vtk.vtkImageViewer()
+      self.iv.SetColorLevel(128)
+      self.iv.SetColorWindow(256)
+    self.iv.SetInputData(resultImage)
+    self.iv.Render()
+
+    if not hasattr(self,"renderWindow"):
+      layoutManager = slicer.app.layoutManager()
+      threeDWidget = layoutManager.threeDWidget(0)
+      threeDView = threeDWidget.threeDView()
+      renderWindow = threeDView.renderWindow()
+      renderWindow.AddObserver(vtk.vtkCommand.EndEvent, self.test_ShaderComputation2)

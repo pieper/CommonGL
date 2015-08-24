@@ -435,6 +435,10 @@ class ShaderComputationTest(ScriptedLoadableModuleTest):
       print("Getting CTA Volume")
       volumeToRender = sampleDataLogic.downloadMRHead()
 
+    if not hasattr(self,"shaderComputation") and hasattr(slicer.modules.ShaderComputationInstance, "test"):
+      oldSelf = slicer.modules.ShaderComputationInstance.test
+      oldSelf.renderWindow.RemoveObserver(oldSelf.renderTag)
+
     if not hasattr(self,"shaderComputation"):
       print('new shaderComputation')
       from vtkSlicerShadedActorModuleLogicPython import vtkOpenGLShaderComputation
@@ -502,6 +506,8 @@ class ShaderComputationTest(ScriptedLoadableModuleTest):
         stpPoint.y = dot(rasToT,sampleCoordinate);
         stpPoint.z = dot(rasToP,sampleCoordinate);
 
+stpPoint /= 200; // TODO: function of size
+
         // read from 3D texture
         sample = texture3D(volumeSampler, stpPoint).r;
 
@@ -523,8 +529,8 @@ class ShaderComputationTest(ScriptedLoadableModuleTest):
 
     rayCastParameters = self.rayCastVolumeParameters(volumeToRender)
     rayCastParameters.update({
-          'rayMaxSteps' : 50,
-          'rayStepSize' : 0.9,
+          'rayMaxSteps' : 5000,
+          'rayStepSize' : 0.01,
     }) # TODO: auto calculate ray parameters
     rayCastSource = """
       // volume ray caster - starts from the front and collects color and opacity
@@ -583,6 +589,7 @@ class ShaderComputationTest(ScriptedLoadableModuleTest):
           float gradientMagnitude;
           sampleVolume(volumeSampler, samplePoint, gradientSize, sample, normal, gradientMagnitude);
 
+
           // Phong lighting
           // http://en.wikipedia.org/wiki/Phong_reflection_model
           vec3 Cdiffuse = vec3(1.,1.,0.);
@@ -601,12 +608,26 @@ class ShaderComputationTest(ScriptedLoadableModuleTest):
           vec4 color;
           color = vec4(phongColor, 1.);
           color.a = (1.*sample/100. + gradientMagnitude/.1) * %(rayStepSize)f*.01;
+          color.a = (1.*sample/.0001 + gradientMagnitude/.1) * %(rayStepSize)f*.01;
+          color.a = 1.;
           color.a = clamp( color.a, 0., 1. );
 
           // accumulate result
-          float a = color.a * 1. /*density*/; // here w is alpha
-          vec4 newPixel = mix( integratedPixel, color, vec4(a) );
-          newPixel.a = integratedPixel.a + a;
+          vec4 newPixel;
+          //float a = color.a * 1. /*density*/; // here w is alpha
+          //newPixel = mix( integratedPixel, color, vec4(a) );
+          //newPixel.a = integratedPixel.a + a;
+          //integratedPixel = newPixel;
+
+    sample *=200.;
+          if (sample > .001) {
+            //return vec4(1., 0., 0., 1.);
+          } else {
+            //return vec4(1., 1., 0., 1.);
+          }
+          color = vec4(sample, sample, sample, sample/1000.);
+          newPixel.rgb = 1-color.a * integratedPixel.rgb + color.a * color.rgb;
+          newPixel.a = integratedPixel.a + color.a;
           integratedPixel = newPixel;
 
           tCurrent += %(rayStepSize)f;
@@ -641,7 +662,7 @@ class ShaderComputationTest(ScriptedLoadableModuleTest):
       'rayCast' : rayCastSource,
     })
 
-    if False:
+    if True:
       print(self.shaderComputation.GetFragmentShaderSource())
       fp = open('/tmp/shader.glsl','w')
       fp.write(self.shaderComputation.GetFragmentShaderSource())
@@ -678,4 +699,5 @@ class ShaderComputationTest(ScriptedLoadableModuleTest):
       threeDView = threeDWidget.threeDView()
       self.renderWindow = threeDView.renderWindow()
       print('adding render observer')
-      self.renderWindow.AddObserver(vtk.vtkCommand.EndEvent, self.test_ShaderComputation2)
+      self.renderTag = self.renderWindow.AddObserver(vtk.vtkCommand.EndEvent, self.test_ShaderComputation2)
+    slicer.modules.ShaderComputationInstance.test = self

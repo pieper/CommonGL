@@ -428,14 +428,15 @@ class ShaderComputationTest(ScriptedLoadableModuleTest):
     if False:
       self.delayDisplay("Starting the test", 100)
 
-    volumeToRender = slicer.util.getNode('CTACardio')
+    volumeToRender = slicer.util.getNode('MRHead')
     if not volumeToRender:
       import SampleData
       sampleDataLogic = SampleData.SampleDataLogic()
       print("Getting CTA Volume")
-      volumeToRender = sampleDataLogic.downloadCTACardio()
+      volumeToRender = sampleDataLogic.downloadMRHead()
 
     if not hasattr(self,"shaderComputation"):
+      print('new shaderComputation')
       from vtkSlicerShadedActorModuleLogicPython import vtkOpenGLShaderComputation
       self.shaderComputation=vtkOpenGLShaderComputation()
 
@@ -675,5 +676,6 @@ class ShaderComputationTest(ScriptedLoadableModuleTest):
       layoutManager = slicer.app.layoutManager()
       threeDWidget = layoutManager.threeDWidget(0)
       threeDView = threeDWidget.threeDView()
-      renderWindow = threeDView.renderWindow()
-      renderWindow.AddObserver(vtk.vtkCommand.EndEvent, self.test_ShaderComputation2)
+      self.renderWindow = threeDView.renderWindow()
+      print('adding render observer')
+      self.renderWindow.AddObserver(vtk.vtkCommand.EndEvent, self.test_ShaderComputation2)

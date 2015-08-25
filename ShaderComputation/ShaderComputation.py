@@ -362,14 +362,23 @@ class ShaderComputationTest(ScriptedLoadableModuleTest):
       else:
         print('Cannot handle nonlinear transforms')
 
-    # TODO: adjust for normalized sampling
+    # dimensions are number of pixels in (row, column, slice)
+    # which maps to 0-1 space of S, T, P
+    dimensions = volumeNode.GetImageData().GetDimensions()
+    ijkToSTP = vtk.vtkMatrix4x4()
+    ijkToSTP.Identity()
+    for diagonal in range(3):
+      ijkToSTP.SetElement(diagonal,diagonal, 1./dimensions[diagonal])
+    ijkToSTP.Multiply4x4(ijkToSTP, rasToIJK, rasToIJK)
+
     parameters = {}
     rows = ('rasToS', 'rasToT', 'rasToP')
     for row in range(3):
       rowKey = rows[row]
       parameters[rowKey] = ""
       for col in range(4):
-        parameters[rowKey] += "%f," % rasToIJK.GetElement(row,col)
+        element = rasToIJK.GetElement(row,col)
+        parameters[rowKey] += "%f," % element
       parameters[rowKey] = parameters[rowKey][:-1] # clear trailing comma
     return parameters
 
@@ -505,8 +514,6 @@ class ShaderComputationTest(ScriptedLoadableModuleTest):
         stpPoint.x = dot(rasToS,sampleCoordinate);
         stpPoint.y = dot(rasToT,sampleCoordinate);
         stpPoint.z = dot(rasToP,sampleCoordinate);
-
-stpPoint /= 200; // TODO: function of size
 
         // read from 3D texture
         sample = texture3D(volumeSampler, stpPoint).r;

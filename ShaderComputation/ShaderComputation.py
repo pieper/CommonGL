@@ -380,6 +380,9 @@ class ShaderComputationTest(ScriptedLoadableModuleTest):
         element = rasToIJK.GetElement(row,col)
         parameters[rowKey] += "%f," % element
       parameters[rowKey] = parameters[rowKey][:-1] # clear trailing comma
+
+    parameters['scalarTypeMax'] = 32767. # TODO: get this from scalar type
+
     return parameters
 
   def rayCastVolumeParameters(self,volumeNode):
@@ -437,12 +440,14 @@ class ShaderComputationTest(ScriptedLoadableModuleTest):
     if False:
       self.delayDisplay("Starting the test", 100)
 
-    volumeToRender = slicer.util.getNode('MRHead')
+    import SampleData
+    sampleDataLogic = SampleData.SampleDataLogic()
+    name, method = 'MRHead', sampleDataLogic.downloadMRHead
+    name, method = 'CTACardio', sampleDataLogic.downloadCTACardio
+    volumeToRender = slicer.util.getNode(name)
     if not volumeToRender:
-      import SampleData
-      sampleDataLogic = SampleData.SampleDataLogic()
-      print("Getting CTA Volume")
-      volumeToRender = sampleDataLogic.downloadMRHead()
+      print("Getting Volume")
+      volumeToRender = method()
 
     if not hasattr(self,"shaderComputation") and hasattr(slicer.modules.ShaderComputationInstance, "test"):
       oldSelf = slicer.modules.ShaderComputationInstance.test
@@ -501,7 +506,11 @@ class ShaderComputationTest(ScriptedLoadableModuleTest):
     """
 
     sampleVolumeSource = """
-      void sampleVolume(in sampler3D volumeSampler, in vec3 samplePoint, in float gradientSize,
+      float textureSampleDenormalized(const in sampler3D volumeSampler, const in vec3 stpPoint) {
+        return ( texture3D(volumeSampler, stpPoint).r * %(scalarTypeMax)f );
+      }
+
+      void sampleVolume(const in sampler3D volumeSampler, const in vec3 samplePoint, const in float gradientSize,
                         out float sample, out vec3 normal, out float gradientMagnitude)
       {
         // vectors to map RAS to stp
@@ -516,15 +525,15 @@ class ShaderComputationTest(ScriptedLoadableModuleTest):
         stpPoint.z = dot(rasToP,sampleCoordinate);
 
         // read from 3D texture
-        sample = texture3D(volumeSampler, stpPoint).r;
+        sample = textureSampleDenormalized(volumeSampler, stpPoint);
 
         // central difference sample gradient (N is -1)
-        float s100 = texture3D(volumeSampler, stpPoint + vec3(gradientSize,0,0)).r;
-        float sN00 = texture3D(volumeSampler, stpPoint - vec3(gradientSize,0,0)).r;
-        float s010 = texture3D(volumeSampler, stpPoint + vec3(0,gradientSize,0)).r;
-        float s0N0 = texture3D(volumeSampler, stpPoint - vec3(0,gradientSize,0)).r;
-        float s001 = texture3D(volumeSampler, stpPoint + vec3(0,0,gradientSize)).r;
-        float s00N = texture3D(volumeSampler, stpPoint - vec3(0,0,gradientSize)).r;
+        float s100 = textureSampleDenormalized(volumeSampler, stpPoint + vec3(gradientSize,0,0));
+        float sN00 = textureSampleDenormalized(volumeSampler, stpPoint - vec3(gradientSize,0,0));
+        float s010 = textureSampleDenormalized(volumeSampler, stpPoint + vec3(0,gradientSize,0));
+        float s0N0 = textureSampleDenormalized(volumeSampler, stpPoint - vec3(0,gradientSize,0));
+        float s001 = textureSampleDenormalized(volumeSampler, stpPoint + vec3(0,0,gradientSize));
+        float s00N = textureSampleDenormalized(volumeSampler, stpPoint - vec3(0,0,gradientSize));
 
         vec3 gradient = vec3( 0.5f*(s100-sN00),
                               0.5f*(s010-s0N0),
@@ -537,7 +546,7 @@ class ShaderComputationTest(ScriptedLoadableModuleTest):
     rayCastParameters = self.rayCastVolumeParameters(volumeToRender)
     rayCastParameters.update({
           'rayMaxSteps' : 5000,
-          'rayStepSize' : 0.01,
+          'rayStepSize' : 0.5,
     }) # TODO: auto calculate ray parameters
     rayCastSource = """
       // volume ray caster - starts from the front and collects color and opacity
@@ -601,9 +610,9 @@ class ShaderComputationTest(ScriptedLoadableModuleTest):
           // http://en.wikipedia.org/wiki/Phong_reflection_model
           vec3 Cdiffuse = vec3(1.,1.,0.);
           vec3 Cspecular = vec3(1.,1.,1.);
-          float Kdiffuse = 1.;
-          float Kspecular = .5;
-          float Shininess = 5.;
+          float Kdiffuse = .75;
+          float Kspecular = .25;
+          float Shininess = 55.;
 
           vec3 V = normalize(eyeRayOrigin - samplePoint);
           vec3 L = normalize(pointLight - samplePoint);
@@ -614,28 +623,22 @@ class ShaderComputationTest(ScriptedLoadableModuleTest):
 
           vec4 color;
           color = vec4(phongColor, 1.);
-          color.a = (1.*sample/100. + gradientMagnitude/.1) * %(rayStepSize)f*.01;
-          color.a = (1.*sample/.0001 + gradientMagnitude/.1) * %(rayStepSize)f*.01;
-          color.a = 1.;
-          color.a = clamp( color.a, 0., 1. );
 
           // accumulate result
-          vec4 newPixel;
-          //float a = color.a * 1. /*density*/; // here w is alpha
-          //newPixel = mix( integratedPixel, color, vec4(a) );
-          //newPixel.a = integratedPixel.a + a;
-          //integratedPixel = newPixel;
 
-    sample *=200.;
-          if (sample > .001) {
-            //return vec4(1., 0., 0., 1.);
-          } else {
-            //return vec4(1., 1., 0., 1.);
+          float sampleEmission = sample / 1.;
+          float sampleOpacity = sample / 10000.;
+          if (sample < 100.) {
+            sampleOpacity = 0.;
           }
-          color = vec4(sample, sample, sample, sample/1000.);
-          newPixel.rgb = 1-color.a * integratedPixel.rgb + color.a * color.rgb;
-          newPixel.a = integratedPixel.a + color.a;
-          integratedPixel = newPixel;
+
+          if (gradientMagnitude > 10.) {
+            //return (color);
+          }
+
+          //integratedPixel.rgb += (1. - integratedPixel.a) * mix(vec3(sampleEmission), color.rgb, 0.5);
+          integratedPixel.rgb += (1. - integratedPixel.a) * color.rgb;
+          integratedPixel.a = integratedPixel.a + %(rayStepSize)f * sampleOpacity;
 
           tCurrent += %(rayStepSize)f;
           if (

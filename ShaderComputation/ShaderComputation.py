@@ -449,6 +449,15 @@ class ShaderComputationTest(ScriptedLoadableModuleTest):
       print("Getting Volume")
       volumeToRender = method()
 
+    if False:
+      ellipsoid = vtk.vtkImageEllipsoidSource()
+      ellipsoid.SetInValue(255)
+      ellipsoid.SetOutValue(0)
+      ellipsoid.SetOutputScalarTypeToShort()
+      ellipsoid.SetWholeExtent(0, 255, 0, 255, 0, 255)
+      ellipsoid.Update()
+      volumeToRender.SetAndObserveImageData(ellipsoid.GetOutputDataObject(0))
+
     if not hasattr(self,"shaderComputation") and hasattr(slicer.modules.ShaderComputationInstance, "test"):
       oldSelf = slicer.modules.ShaderComputationInstance.test
       oldSelf.renderWindow.RemoveObserver(oldSelf.renderTag)
@@ -535,9 +544,11 @@ class ShaderComputationTest(ScriptedLoadableModuleTest):
         float s001 = textureSampleDenormalized(volumeSampler, stpPoint + vec3(0,0,gradientSize));
         float s00N = textureSampleDenormalized(volumeSampler, stpPoint - vec3(0,0,gradientSize));
 
-        vec3 gradient = vec3( 0.5f*(s100-sN00),
-                              0.5f*(s010-s0N0),
-                              0.5f*(s001-s00N));
+
+        // TODO normal should be transformed back to RAS
+        vec3 gradient = vec3( (s100-sN00),
+                              (s010-s0N0),
+                              (s001-s00N)) / vec3(2. * gradientSize);
         gradientMagnitude = length(gradient);
         normal = normalize(gradient);
       }
@@ -583,7 +594,7 @@ class ShaderComputationTest(ScriptedLoadableModuleTest):
 
         // march along ray from front, accumulating color and opacity
         vec4 integratedPixel = vec4(0.);
-        float gradientSize = .05;
+        float gradientSize = .001;
         float tCurrent = tNear + gradientSize;
         float sample;
         int rayStep;
@@ -610,16 +621,16 @@ class ShaderComputationTest(ScriptedLoadableModuleTest):
           // http://en.wikipedia.org/wiki/Phong_reflection_model
           vec3 Cdiffuse = vec3(1.,1.,0.);
           vec3 Cspecular = vec3(1.,1.,1.);
-          float Kdiffuse = .75;
-          float Kspecular = .25;
+          float Kdiffuse = .85;
+          float Kspecular = .15;
           float Shininess = 55.;
 
           vec3 V = normalize(eyeRayOrigin - samplePoint);
           vec3 L = normalize(pointLight - samplePoint);
-          vec3 R = normalize(2.*(dot(L,normal))*normal - L);
+          vec3 R = reflect(L,normal);
           vec3 phongColor = vec3(0.);
-          phongColor = phongColor + Kdiffuse * dot(L,normal) * Cdiffuse;
-          phongColor = phongColor + Kspecular * pow( dot(R,V), Shininess ) * Cspecular;
+          phongColor += Kdiffuse * dot(L,normal) * Cdiffuse;
+          phongColor += Kspecular * pow( dot(R,V), Shininess ) * Cspecular;
 
           vec4 color;
           color = vec4(phongColor, 1.);
@@ -627,18 +638,25 @@ class ShaderComputationTest(ScriptedLoadableModuleTest):
           // accumulate result
 
           float sampleEmission = sample / 1.;
-          float sampleOpacity = sample / 10000.;
+          float sampleOpacity = sample / 1000.;
           if (sample < 100.) {
             sampleOpacity = 0.;
           }
 
           if (gradientMagnitude > 10.) {
-            //return (color);
+           //return (color);
           }
 
-          //integratedPixel.rgb += (1. - integratedPixel.a) * mix(vec3(sampleEmission), color.rgb, 0.5);
-          integratedPixel.rgb += (1. - integratedPixel.a) * color.rgb;
+
+          // scalar
+          //integratedPixel.rgb += (1. - integratedPixel.a) * vec3(sampleEmission);
+          integratedPixel.rgb += clamp(vec3(sampleEmission), 0., 3000.) * 10. *  %(rayStepSize)f;
           integratedPixel.a = integratedPixel.a + %(rayStepSize)f * sampleOpacity;
+
+          // Phong tests
+          //integratedPixel.rgb += (1. - integratedPixel.a) * mix(vec3(sampleEmission), color.rgb, 0.5);
+          //integratedPixel.rgb += (1. - integratedPixel.a) * color.rgb / 10.;
+          //integratedPixel.a = integratedPixel.a + %(rayStepSize)f * gradientMagnitude/100.;
 
           tCurrent += %(rayStepSize)f;
           if (
@@ -672,7 +690,7 @@ class ShaderComputationTest(ScriptedLoadableModuleTest):
       'rayCast' : rayCastSource,
     })
 
-    if True:
+    if False:
       print(self.shaderComputation.GetFragmentShaderSource())
       fp = open('/tmp/shader.glsl','w')
       fp.write(self.shaderComputation.GetFragmentShaderSource())

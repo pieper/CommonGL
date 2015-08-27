@@ -280,7 +280,7 @@ class ShaderComputationTest(ScriptedLoadableModuleTest):
     resize.SetOutputDimensions(256,256,128)
     resize.Update()
 
-    from vtkSlicerShadedActorModuleLogicPython import *
+    from vtkSlicerShadedActorModuleLogicPython import vtkOpenGLShaderComputation
 
     shaderComputation=vtkOpenGLShaderComputation()
 
@@ -397,8 +397,19 @@ class ShaderComputationTest(ScriptedLoadableModuleTest):
 
     rasBounds = [0,]*6
     volumeNode.GetRASBounds(rasBounds)
-    parameters['rasBoxMin'] = "%f, %f, %f" % (rasBounds[0], rasBounds[2], rasBounds[4])
-    parameters['rasBoxMax'] = "%f, %f, %f" % (rasBounds[1], rasBounds[3], rasBounds[5])
+    rasBoxMin = (rasBounds[0], rasBounds[2], rasBounds[4])
+    rasBoxMax = (rasBounds[1], rasBounds[3], rasBounds[5])
+    parameters['rasBoxMin'] = "%f, %f, %f" % rasBoxMin
+    parameters['rasBoxMax'] = "%f, %f, %f" % rasBoxMax
+
+    # conservative guesses:
+    # sampleStep is in mm, shortest side in world space divided by max volume dimension
+    # gradientSize is in [0,1] texture sapce, sampleStep divided by max volume dimensions
+
+    rasMin = min(rasBoxMax[0] - rasBoxMin[0], rasBoxMax[1] - rasBoxMin[1], rasBoxMax[2] - rasBoxMin[2])
+    maxDimension = max(volumeNode.GetImageData().GetDimensions())
+    parameters['sampleStep'] = rasMin / maxDimension
+    parameters['gradientSize'] = parameters['sampleStep'] / maxDimension
 
     # get the camera parameters from default 3D window
     layoutManager = slicer.app.layoutManager()
@@ -425,6 +436,91 @@ class ShaderComputationTest(ScriptedLoadableModuleTest):
 
     return parameters
 
+  def transferFunctionSource(self, volumePropertyNode):
+    """Create source code for transfer function that maps
+    a sample and gradient to a color and opacity based on
+    the passed volumePropertyNode.
+    """
+    scalarOpacity = volumePropertyNode.GetScalarOpacity(0)
+    colorTransfer = volumePropertyNode.GetColor(0)
+
+    source = """
+    void transferFunction(const in float sample, const in float gradientMagnitude,
+                          out vec3 color, out float opacity)
+    {
+    """
+
+    # convert the scalarOpacity transfer function to a procedure
+    # - ignore the interpolation options; only linear interpolation
+    intensities = []
+    opacities = []
+    size = scalarOpacity.GetSize()
+    values = [0,]*4
+    for index in range(size):
+      scalarOpacity.GetNodeValue(index, values)
+      intensities.append(values[0])
+      opacities.append(values[1])
+    source += """
+      if (sample < %(minIntensity)f) {
+        opacity = %(minOpacity)f;
+      }
+    """ % {'minIntensity': intensities[0], 'minOpacity': opacities[0]}
+    for index in range(size-1):
+      currentIndex = index + 1
+      source += """
+        else if (sample < %(currentIntesity)f) {
+          opacity = mix(%(lastOpacity)f, %(currentOpacity)f, (sample - %(lastIntensity)f) / %(intensityRange)f);
+        }
+      """ % {'currentIntesity': intensities[currentIndex],
+             'lastOpacity': opacities[index],
+             'currentOpacity': opacities[currentIndex],
+             'lastIntensity': intensities[index],
+             'intensityRange': intensities[currentIndex] - intensities[index],
+             }
+    source += """
+      else {
+        opacity = %(lastOpacity)f;
+      }
+    """ % {'lastOpacity': opacities[size-1]}
+
+    # convert the colorTransfer to a procedure
+    intensities = []
+    colors = []
+    size = colorTransfer.GetSize()
+    values = [0,]*6
+    for index in range(size):
+      colorTransfer.GetNodeValue(index, values)
+      intensities.append(values[0])
+      colors.append("vec3" + str(tuple(values[1:4])))
+    print(colorTransfer)
+    source += """
+      if (sample < %(minIntensity)f) {
+        color = %(minColor)s;
+      }
+    """ % {'minIntensity': intensities[0], 'minColor': colors[0]}
+    for index in range(size-1):
+      currentIndex = index + 1
+      source += """
+        else if (sample < %(currentIntesity)f) {
+          color = mix(%(lastColor)s, %(currentColor)s, (sample - %(lastIntensity)f) / %(intensityRange)f);
+        }
+      """ % {'currentIntesity': intensities[currentIndex],
+             'lastColor': colors[index],
+             'currentColor': colors[currentIndex],
+             'lastIntensity': intensities[index],
+             'intensityRange': intensities[currentIndex] - intensities[index],
+             }
+    source += """
+      else {
+        color = %(lastColor)s;
+      }
+    """ % {'lastColor': colors[size-1]}
+    source += """
+    }
+    """
+    return source
+
+
   def test_ShaderComputation2(self, caller=None, event=None):
     """ Ideally you should have several levels of tests.  At the lowest level
     tests should exercise the functionality of the logic with different inputs
@@ -436,9 +532,6 @@ class ShaderComputationTest(ScriptedLoadableModuleTest):
     module.  For example, if a developer removes a feature that you depend on,
     your test should break so they know that the feature is needed.
     """
-
-    if False:
-      self.delayDisplay("Starting the test", 100)
 
     import SampleData
     sampleDataLogic = SampleData.SampleDataLogic()
@@ -550,14 +643,31 @@ class ShaderComputationTest(ScriptedLoadableModuleTest):
                               (s010-s0N0),
                               (s001-s00N)) / vec3(2. * gradientSize);
         gradientMagnitude = length(gradient);
-        normal = normalize(gradient);
+        normal = -.1/gradientMagnitude * gradient;
       }
     """ % self.sampleVolumeParameters(volumeToRender)
 
+    volumePropertyNode = slicer.util.getNode('ShaderVolumeProperty')
+    if not volumePropertyNode:
+      volumePropertyNode = slicer.vtkMRMLVolumePropertyNode()
+      volumePropertyNode.SetName('ShaderVolumeProperty')
+      scalarOpacity = vtk.vtkPiecewiseFunction()
+      points = ( (-1024., 0.), (-640., 0.), (36., 1.), (3532., 1.) )
+      for point in points:
+        scalarOpacity.AddPoint(*point)
+      volumePropertyNode.SetScalarOpacity(scalarOpacity)
+      colorTransfer = vtk.vtkColorTransferFunction()
+      colors = ( (-1024., (0., 0., 0.)), (-707., (0., 0., 0.)), (349., (.2, .2, .2)), (719., (1., 1., 1.)) )
+      for intensity,rgb in colors:
+        colorTransfer.AddRGBPoint(intensity, *rgb)
+      volumePropertyNode.SetScalarOpacity(scalarOpacity)
+      volumePropertyNode.SetColor(colorTransfer, 0)
+      slicer.mrmlScene.AddNode(volumePropertyNode)
+    transferFunctionSource = self.transferFunctionSource(volumePropertyNode)
+
     rayCastParameters = self.rayCastVolumeParameters(volumeToRender)
     rayCastParameters.update({
-          'rayMaxSteps' : 5000,
-          'rayStepSize' : 0.5,
+          'rayMaxSteps' : 500000,
     }) # TODO: auto calculate ray parameters
     rayCastSource = """
       // volume ray caster - starts from the front and collects color and opacity
@@ -594,8 +704,8 @@ class ShaderComputationTest(ScriptedLoadableModuleTest):
 
         // march along ray from front, accumulating color and opacity
         vec4 integratedPixel = vec4(0.);
-        float gradientSize = .001;
-        float tCurrent = tNear + gradientSize;
+        float gradientSize = %(gradientSize)f;
+        float tCurrent = tNear;
         float sample;
         int rayStep;
         for(rayStep = 0; rayStep < %(rayMaxSteps)d; rayStep++) {
@@ -619,6 +729,7 @@ class ShaderComputationTest(ScriptedLoadableModuleTest):
 
           // Phong lighting
           // http://en.wikipedia.org/wiki/Phong_reflection_model
+          /*
           vec3 Cdiffuse = vec3(1.,1.,0.);
           vec3 Cspecular = vec3(1.,1.,1.);
           float Kdiffuse = .85;
@@ -634,40 +745,40 @@ class ShaderComputationTest(ScriptedLoadableModuleTest):
 
           vec4 color;
           color = vec4(phongColor, 1.);
+          */
 
           // accumulate result
 
-          float sampleEmission = sample / 1.;
-          float sampleOpacity = sample / 1000.;
-          if (sample < 100.) {
-            sampleOpacity = 0.;
-          }
+          float sampleEmission = %(sampleStep)f * sample / 10000.;
+          float sampleOpacity = %(sampleStep)f * sample / 100.;
 
-          if (gradientMagnitude > 10.) {
-           //return (color);
-          }
 
+          vec3 color;
+          float opacity;
+          transferFunction(sample, gradientMagnitude, color, opacity);
 
           // scalar
-          //integratedPixel.rgb += (1. - integratedPixel.a) * vec3(sampleEmission);
-          integratedPixel.rgb += clamp(vec3(sampleEmission), 0., 3000.) * 10. *  %(rayStepSize)f;
-          integratedPixel.a = integratedPixel.a + %(rayStepSize)f * sampleOpacity;
+          //integratedPixel.rgb += (1. - integratedPixel.a) * mix(vec3(sampleEmission), phongColor, 0.000005);
+          integratedPixel.rgb += integratedPixel.a * color;
+          integratedPixel.a += sampleOpacity;
 
           // Phong tests
-          //integratedPixel.rgb += (1. - integratedPixel.a) * mix(vec3(sampleEmission), color.rgb, 0.5);
-          //integratedPixel.rgb += (1. - integratedPixel.a) * color.rgb / 10.;
-          //integratedPixel.a = integratedPixel.a + %(rayStepSize)f * gradientMagnitude/100.;
+          //integratedPixel.rgb += (1. - integratedPixel.a) * mix(vec3(sampleEmission/1000.), color.rgb, 0.5);
+          //integratedPixel.rgb += (1. - integratedPixel.a) * color.rgb / 1.;
+          //integratedPixel.a += %(sampleStep)f * gradientMagnitude/1000.;
+          //integratedPixel.a += %(sampleStep)f * sampleOpacity;
 
-          tCurrent += %(rayStepSize)f;
+          tCurrent += %(sampleStep)f;
           if (
-              tCurrent >= tFar - gradientSize // stepped out of the volume
+              tCurrent >= tFar  // stepped out of the volume
                 ||
-              integratedPixel.a >= 1.  // pixel is saturated
+              integratedPixel.a > 1.  // pixel is saturated
           ) {
             break; // we can stop now
           }
         }
-        return (integratedPixel);
+        integratedPixel = clamp(integratedPixel, 0., 1.);
+        return (vec4 (mix(integratedPixel.rgb, vec3(1., 1., 0.), 1.-integratedPixel.a), 1.));
       }
     """ % rayCastParameters
 
@@ -675,6 +786,7 @@ class ShaderComputationTest(ScriptedLoadableModuleTest):
       %(header)s
       %(intersectBox)s
       %(sampleVolume)s
+      %(transferFunction)s
       %(rayCast)s
 
       varying vec3 interpolatedTextureCoordinate;
@@ -687,6 +799,7 @@ class ShaderComputationTest(ScriptedLoadableModuleTest):
       'header' : headerSource,
       'intersectBox' : intersectBoxSource,
       'sampleVolume' : sampleVolumeSource,
+      'transferFunction' : transferFunctionSource,
       'rayCast' : rayCastSource,
     })
 

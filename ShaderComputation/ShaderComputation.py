@@ -492,7 +492,6 @@ class ShaderComputationTest(ScriptedLoadableModuleTest):
       colorTransfer.GetNodeValue(index, values)
       intensities.append(values[0])
       colors.append("vec3" + str(tuple(values[1:4])))
-    print(colorTransfer)
     source += """
       if (sample < %(minIntensity)f) {
         color = %(minColor)s;
@@ -535,8 +534,8 @@ class ShaderComputationTest(ScriptedLoadableModuleTest):
 
     import SampleData
     sampleDataLogic = SampleData.SampleDataLogic()
-    name, method = 'MRHead', sampleDataLogic.downloadMRHead
     name, method = 'CTACardio', sampleDataLogic.downloadCTACardio
+    name, method = 'MRHead', sampleDataLogic.downloadMRHead
     volumeToRender = slicer.util.getNode(name)
     if not volumeToRender:
       print("Getting Volume")
@@ -652,12 +651,12 @@ class ShaderComputationTest(ScriptedLoadableModuleTest):
       volumePropertyNode = slicer.vtkMRMLVolumePropertyNode()
       volumePropertyNode.SetName('ShaderVolumeProperty')
       scalarOpacity = vtk.vtkPiecewiseFunction()
-      points = ( (-1024., 0.), (-640., 0.), (36., 1.), (3532., 1.) )
+      points = ( (-1024., 0.), (20., 0.), (30., 1.), (3532., 1.) )
       for point in points:
         scalarOpacity.AddPoint(*point)
       volumePropertyNode.SetScalarOpacity(scalarOpacity)
       colorTransfer = vtk.vtkColorTransferFunction()
-      colors = ( (-1024., (0., 0., 0.)), (-707., (0., 0., 0.)), (349., (.2, .2, .2)), (719., (1., 1., 1.)) )
+      colors = ( (-1024., (0., 0., 0.)), (-7., (0., 0., 0.)), (136., (.9, .9, .9)), (719., (1., 1., 1.)) )
       for intensity,rgb in colors:
         colorTransfer.AddRGBPoint(intensity, *rgb)
       volumePropertyNode.SetScalarOpacity(scalarOpacity)
@@ -759,8 +758,8 @@ class ShaderComputationTest(ScriptedLoadableModuleTest):
 
           // scalar
           //integratedPixel.rgb += (1. - integratedPixel.a) * mix(vec3(sampleEmission), phongColor, 0.000005);
-          integratedPixel.rgb += integratedPixel.a * color;
-          integratedPixel.a += sampleOpacity;
+          integratedPixel.rgb += 0.1 * integratedPixel.a * sampleOpacity * color;
+          integratedPixel.a += 0.1 * sampleOpacity;
 
           // Phong tests
           //integratedPixel.rgb += (1. - integratedPixel.a) * mix(vec3(sampleEmission/1000.), color.rgb, 0.5);
@@ -778,7 +777,7 @@ class ShaderComputationTest(ScriptedLoadableModuleTest):
           }
         }
         integratedPixel = clamp(integratedPixel, 0., 1.);
-        return (vec4 (mix(integratedPixel.rgb, vec3(1., 1., 0.), 1.-integratedPixel.a), 1.));
+        return (vec4 (mix(integratedPixel.rgb, vec3(.1, .1, 0.), 1.-integratedPixel.a), 1.));
       }
     """ % rayCastParameters
 

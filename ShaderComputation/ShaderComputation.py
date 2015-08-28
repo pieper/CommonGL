@@ -728,7 +728,6 @@ class ShaderComputationTest(ScriptedLoadableModuleTest):
 
           // Phong lighting
           // http://en.wikipedia.org/wiki/Phong_reflection_model
-          /*
           vec3 Cdiffuse = vec3(1.,1.,0.);
           vec3 Cspecular = vec3(1.,1.,1.);
           float Kdiffuse = .85;
@@ -742,6 +741,7 @@ class ShaderComputationTest(ScriptedLoadableModuleTest):
           phongColor += Kdiffuse * dot(L,normal) * Cdiffuse;
           phongColor += Kspecular * pow( dot(R,V), Shininess ) * Cspecular;
 
+          /*
           vec4 color;
           color = vec4(phongColor, 1.);
           */
@@ -758,7 +758,7 @@ class ShaderComputationTest(ScriptedLoadableModuleTest):
 
           // scalar
           //integratedPixel.rgb += (1. - integratedPixel.a) * mix(vec3(sampleEmission), phongColor, 0.000005);
-          integratedPixel.rgb += 0.1 * integratedPixel.a * sampleOpacity * color;
+          integratedPixel.rgb += 0.1 * integratedPixel.a * sampleOpacity * color + 0.1 * phongColor;
           integratedPixel.a += 0.1 * sampleOpacity;
 
           // Phong tests

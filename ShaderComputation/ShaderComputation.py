@@ -146,92 +146,8 @@ class ShaderComputationLogic(ScriptedLoadableModuleLogic):
   https://github.com/Slicer/Slicer/blob/master/Base/Python/slicer/ScriptedLoadableModule.py
   """
 
-  def hasImageData(self,volumeNode):
-    """This is an example logic method that
-    returns true if the passed in volume
-    node has valid image data
-    """
-    if not volumeNode:
-      logging.debug('hasImageData failed: no volume node')
-      return False
-    if volumeNode.GetImageData() == None:
-      logging.debug('hasImageData failed: no image data in volume node')
-      return False
-    return True
-
-  def isValidInputOutputData(self, inputVolumeNode, outputVolumeNode):
-    """Validates if the output is not the same as input
-    """
-    if not inputVolumeNode:
-      logging.debug('isValidInputOutputData failed: no input volume node defined')
-      return False
-    if not outputVolumeNode:
-      logging.debug('isValidInputOutputData failed: no output volume node defined')
-      return False
-    if inputVolumeNode.GetID()==outputVolumeNode.GetID():
-      logging.debug('isValidInputOutputData failed: input and output volume is the same. Create a new volume for output to avoid this error.')
-      return False
-    return True
-
-  def takeScreenshot(self,name,description,type=-1):
-    # show the message even if not taking a screen shot
-    slicer.util.delayDisplay('Take screenshot: '+description+'.\nResult is available in the Annotations module.', 3000)
-
-    lm = slicer.app.layoutManager()
-    # switch on the type to get the requested window
-    widget = 0
-    if type == slicer.qMRMLScreenShotDialog.FullLayout:
-      # full layout
-      widget = lm.viewport()
-    elif type == slicer.qMRMLScreenShotDialog.ThreeD:
-      # just the 3D window
-      widget = lm.threeDWidget(0).threeDView()
-    elif type == slicer.qMRMLScreenShotDialog.Red:
-      # red slice window
-      widget = lm.sliceWidget("Red")
-    elif type == slicer.qMRMLScreenShotDialog.Yellow:
-      # yellow slice window
-      widget = lm.sliceWidget("Yellow")
-    elif type == slicer.qMRMLScreenShotDialog.Green:
-      # green slice window
-      widget = lm.sliceWidget("Green")
-    else:
-      # default to using the full window
-      widget = slicer.util.mainWindow()
-      # reset the type so that the node is set correctly
-      type = slicer.qMRMLScreenShotDialog.FullLayout
-
-    # grab and convert to vtk image data
-    qpixMap = qt.QPixmap().grabWidget(widget)
-    qimage = qpixMap.toImage()
-    imageData = vtk.vtkImageData()
-    slicer.qMRMLUtils().qImageToVtkImageData(qimage,imageData)
-
-    annotationLogic = slicer.modules.annotations.logic()
-    annotationLogic.CreateSnapShot(name, description, type, 1, imageData)
-
-  def run(self, inputVolume, outputVolume, imageThreshold, enableScreenshots=0):
-    """
-    Run the actual algorithm
-    """
-
-    if not self.isValidInputOutputData(inputVolume, outputVolume):
-      slicer.util.errorDisplay('Input volume is the same as output volume. Choose a different output volume.')
-      return False
-
-    logging.info('Processing started')
-
-    # Compute the thresholded output volume using the Threshold Scalar Volume CLI module
-    cliParams = {'InputVolume': inputVolume.GetID(), 'OutputVolume': outputVolume.GetID(), 'ThresholdValue' : imageThreshold, 'ThresholdType' : 'Above'}
-    cliNode = slicer.cli.run(slicer.modules.thresholdscalarvolume, None, cliParams, wait_for_completion=True)
-
-    # Capture screenshot
-    if enableScreenshots:
-      self.takeScreenshot('ShaderComputationTest-Start','MyScreenshot',-1)
-
-    logging.info('Processing completed')
-
-    return True
+  def __init__(self):
+    ScriptedLoadableModuleLogic.__init__(self)
 
 
 class ShaderComputationTest(ScriptedLoadableModuleTest):
@@ -406,9 +322,9 @@ class ShaderComputationTest(ScriptedLoadableModuleTest):
     # sampleStep is in mm, shortest side in world space divided by max volume dimension
     # gradientSize is in [0,1] texture sapce, sampleStep divided by max volume dimensions
 
-    rasMin = min(rasBoxMax[0] - rasBoxMin[0], rasBoxMax[1] - rasBoxMin[1], rasBoxMax[2] - rasBoxMin[2])
+    rasMinSide = min(rasBoxMax[0] - rasBoxMin[0], rasBoxMax[1] - rasBoxMin[1], rasBoxMax[2] - rasBoxMin[2])
     maxDimension = max(volumeNode.GetImageData().GetDimensions())
-    parameters['sampleStep'] = rasMin / maxDimension
+    parameters['sampleStep'] = .25 * rasMinSide / maxDimension
     parameters['gradientSize'] = parameters['sampleStep'] / maxDimension
 
     # get the camera parameters from default 3D window
@@ -534,8 +450,8 @@ class ShaderComputationTest(ScriptedLoadableModuleTest):
 
     import SampleData
     sampleDataLogic = SampleData.SampleDataLogic()
-    name, method = 'CTACardio', sampleDataLogic.downloadCTACardio
     name, method = 'MRHead', sampleDataLogic.downloadMRHead
+    name, method = 'CTACardio', sampleDataLogic.downloadCTACardio
     volumeToRender = slicer.util.getNode(name)
     if not volumeToRender:
       print("Getting Volume")
@@ -621,9 +537,9 @@ class ShaderComputationTest(ScriptedLoadableModuleTest):
 
         vec3 stpPoint;
         vec4 sampleCoordinate = vec4(samplePoint, 1.);
-        stpPoint.x = dot(rasToS,sampleCoordinate);
-        stpPoint.y = dot(rasToT,sampleCoordinate);
-        stpPoint.z = dot(rasToP,sampleCoordinate);
+        stpPoint.s = dot(rasToS,sampleCoordinate);
+        stpPoint.t = dot(rasToT,sampleCoordinate);
+        stpPoint.p = dot(rasToP,sampleCoordinate);
 
         // read from 3D texture
         sample = textureSampleDenormalized(volumeSampler, stpPoint);
@@ -642,7 +558,7 @@ class ShaderComputationTest(ScriptedLoadableModuleTest):
                               (s010-s0N0),
                               (s001-s00N)) / vec3(2. * gradientSize);
         gradientMagnitude = length(gradient);
-        normal = -.1/gradientMagnitude * gradient;
+        normal = (-1. / gradientMagnitude) * gradient;
       }
     """ % self.sampleVolumeParameters(volumeToRender)
 
@@ -651,12 +567,12 @@ class ShaderComputationTest(ScriptedLoadableModuleTest):
       volumePropertyNode = slicer.vtkMRMLVolumePropertyNode()
       volumePropertyNode.SetName('ShaderVolumeProperty')
       scalarOpacity = vtk.vtkPiecewiseFunction()
-      points = ( (-1024., 0.), (20., 0.), (30., 1.), (3532., 1.) )
+      points = ( (-1024., 0.), (20., 0.), (300., .1), (3532., .1) )
       for point in points:
         scalarOpacity.AddPoint(*point)
       volumePropertyNode.SetScalarOpacity(scalarOpacity)
       colorTransfer = vtk.vtkColorTransferFunction()
-      colors = ( (-1024., (0., 0., 0.)), (-7., (0., 0., 0.)), (136., (.9, .9, .9)), (719., (1., 1., 1.)) )
+      colors = ( (-1024., (0., 0., 0.)), (50., (0., 0., 0.)), (719., (1., 1., 1.)) )
       for intensity,rgb in colors:
         colorTransfer.AddRGBPoint(intensity, *rgb)
       volumePropertyNode.SetScalarOpacity(scalarOpacity)
@@ -688,7 +604,7 @@ class ShaderComputationTest(ScriptedLoadableModuleTest):
                                       + normalizedCoordinate.y * vec3( %(viewUp)s     ) );
 
 
-        vec3 pointLight = vec3(250., 250., 400.); // TODO
+        vec3 pointLight = vec3(-250., 250., 400.); // TODO
 
         // find intersection with box, possibly terminate early
         float tNear, tFar;
@@ -734,12 +650,14 @@ class ShaderComputationTest(ScriptedLoadableModuleTest):
           float Kspecular = .15;
           float Shininess = 55.;
 
-          vec3 V = normalize(eyeRayOrigin - samplePoint);
-          vec3 L = normalize(pointLight - samplePoint);
-          vec3 R = reflect(L,normal);
           vec3 phongColor = vec3(0.);
-          phongColor += Kdiffuse * dot(L,normal) * Cdiffuse;
-          phongColor += Kspecular * pow( dot(R,V), Shininess ) * Cspecular;
+          vec3 V = normalize(eyeRayOrigin - samplePoint);
+          if (dot(V, normal) > 0.) {
+            vec3 L = normalize(pointLight - samplePoint);
+            vec3 R = reflect(L,normal);
+            phongColor += Kdiffuse * dot(L,normal) * Cdiffuse;
+            phongColor += Kspecular * pow( dot(R,V), Shininess ) * Cspecular;
+          }
 
           /*
           vec4 color;
@@ -753,9 +671,27 @@ class ShaderComputationTest(ScriptedLoadableModuleTest):
 
 
           vec3 color;
-          float opacity;
+          float opacity = 0.;
           transferFunction(sample, gradientMagnitude, color, opacity);
 
+          // Ray sum
+          /*
+          if (opacity > 0.) {
+            //integratedPixel.rgb += color;
+            integratedPixel.rgb += color * opacity;
+          }
+          */
+
+          // gradient sum
+          //integratedPixel.rgb += vec3(sqrt(gradientMagnitude) * normalize(abs(normal)) );
+          //integratedPixel.rgb += vec3(sqrt(gradientMagnitude));
+
+          integratedPixel.a += opacity;
+          integratedPixel.rgb += integratedPixel.a * opacity * phongColor.rgb;
+
+
+
+/*
           // scalar
           //integratedPixel.rgb += (1. - integratedPixel.a) * mix(vec3(sampleEmission), phongColor, 0.000005);
           integratedPixel.rgb += 0.1 * integratedPixel.a * sampleOpacity * color + 0.1 * phongColor;
@@ -766,6 +702,105 @@ class ShaderComputationTest(ScriptedLoadableModuleTest):
           //integratedPixel.rgb += (1. - integratedPixel.a) * color.rgb / 1.;
           //integratedPixel.a += %(sampleStep)f * gradientMagnitude/1000.;
           //integratedPixel.a += %(sampleStep)f * sampleOpacity;
+*/
+          tCurrent += %(sampleStep)f;
+          if (
+              tCurrent >= tFar  // stepped out of the volume
+                ||
+              integratedPixel.a > 1.  // pixel is saturated
+          ) {
+            break; // we can stop now
+          }
+        }
+        if (integratedPixel.a > 0.) {
+          return(vec4(1.);
+        }
+        integratedPixel /= 0.1 * rayStep;
+        integratedPixel = clamp(integratedPixel, 0., 1.);
+        return(vec4(integratedPixel.rgb, 1.));
+        //return (vec4(1. - integratedPixel.rgb, 1.));
+        //return (vec4 (mix(integratedPixel.rgb, vec3(.1, .1, 0.), 1.-integratedPixel.a), 1.));
+      }
+    """ % rayCastParameters
+
+    # simplified for debugging
+    rayCastSource = """
+      // volume ray caster - starts from the front and collects color and opacity
+      // contributions until fully saturated.
+      // Sample coordinate is 0->1 texture space
+      vec4 rayCast( in vec3 sampleCoordinate, in sampler3D volumeSampler )
+      {
+        vec4 backgroundRGBA = vec4(0.,0.,.5,1.); // TODO: mid blue background for now
+
+        // TODO aspect: float aspect = imageW / (1.0 * imageH);
+        vec2 normalizedCoordinate = 2. * (sampleCoordinate.st -.5);
+
+        // calculate eye ray in world space
+        vec3 eyeRayOrigin = vec3(%(eyeRayOrigin)s);
+        vec3 eyeRayDirection;
+
+        // ||viewNormal + u * viewRight + v * viewUp||
+
+        eyeRayDirection = normalize (                            vec3( %(viewNormal)s )
+                                      + normalizedCoordinate.x * vec3( %(viewRight)s  )
+                                      + normalizedCoordinate.y * vec3( %(viewUp)s     ) );
+
+
+        vec3 pointLight = vec3(-250., 250., 400.); // TODO
+
+        // find intersection with box, possibly terminate early
+        float tNear, tFar;
+        vec3 rasBoxMin = vec3( %(rasBoxMin)s );
+        vec3 rasBoxMax = vec3( %(rasBoxMax)s );
+        bool hit = intersectBox( eyeRayOrigin, eyeRayDirection, rasBoxMin, rasBoxMax, tNear, tFar );
+        if (!hit) {
+          return (backgroundRGBA);
+        }
+
+        if (tNear < 0.) tNear = 0.;     // clamp to near plane
+
+        // march along ray from front, accumulating color and opacity
+        vec4 integratedPixel = vec4(0.);
+        float gradientSize = %(gradientSize)f;
+        float tCurrent = tNear;
+        float sample;
+        int rayStep;
+        for(rayStep = 0; rayStep < %(rayMaxSteps)d; rayStep++) {
+
+          vec3 samplePoint = eyeRayOrigin + eyeRayDirection * tCurrent;
+
+          vec3 normal;
+          float gradientMagnitude;
+          sampleVolume(volumeSampler, samplePoint, gradientSize, sample, normal, gradientMagnitude);
+
+          // Phong lighting
+          // http://en.wikipedia.org/wiki/Phong_reflection_model
+          vec3 Cdiffuse = vec3(1.,1.,0.);
+          vec3 Cspecular = vec3(1.,1.,1.);
+          float Kdiffuse = .85;
+          float Kspecular = .15;
+          float Shininess = 55.;
+
+          vec3 phongColor = vec3(0.);
+          vec3 pointToEye = normalize(eyeRayOrigin - samplePoint);
+          if (dot(pointToEye, normal) > 0.) {
+            vec3 pointToLight = normalize(pointLight - samplePoint);
+            vec3 lightReflection = reflect(pointToLight,normal);
+            phongColor += Kdiffuse * dot(pointToLight,normal) * Cdiffuse;
+            phongColor += Kspecular * pow( dot(lightReflection,pointToEye), Shininess ) * Cspecular;
+          }
+
+          vec3 color;
+          float opacity;
+          transferFunction(sample, gradientMagnitude, color, opacity);
+
+          if (tCurrent < 30.) {
+            opacity = 0.;
+          }
+
+          integratedPixel.rgb = mix(color, integratedPixel.rgb, integratedPixel.a);
+          integratedPixel.a += opacity * %(sampleStep)f;
+          integratedPixel = clamp(integratedPixel, 0., 1.);
 
           tCurrent += %(sampleStep)f;
           if (
@@ -776,8 +811,7 @@ class ShaderComputationTest(ScriptedLoadableModuleTest):
             break; // we can stop now
           }
         }
-        integratedPixel = clamp(integratedPixel, 0., 1.);
-        return (vec4 (mix(integratedPixel.rgb, vec3(.1, .1, 0.), 1.-integratedPixel.a), 1.));
+        return(vec4(mix(backgroundRGBA.rgb, integratedPixel.rgb, integratedPixel.a), 1.));
       }
     """ % rayCastParameters
 
@@ -811,7 +845,7 @@ class ShaderComputationTest(ScriptedLoadableModuleTest):
     self.shaderComputation.SetTextureImageData(volumeToRender.GetImageData())
 
     resultImage = vtk.vtkImageData()
-    resultImage.SetDimensions(512, 512, 1)
+    resultImage.SetDimensions(1024, 1024, 1)
     resultImage.AllocateScalars(vtk.VTK_UNSIGNED_CHAR, 4)
     self.shaderComputation.SetResultImageData(resultImage)
 

@@ -572,7 +572,8 @@ class ShaderComputationTest(ScriptedLoadableModuleTest):
         scalarOpacity.AddPoint(*point)
       volumePropertyNode.SetScalarOpacity(scalarOpacity)
       colorTransfer = vtk.vtkColorTransferFunction()
-      colors = ( (-1024., (0., 0., 0.)), (50., (0., 0., 0.)), (719., (1., 1., 1.)) )
+      colors = ( (-1024., (0., 0., 0.)), (-984., (0., 0., 0.)), (469., (1., 1., 1.)) )
+      colors = ( (-1024., (0., 0., 0.)), (3., (0., 0., 0.)), (131., (1., 1., 1.)) )
       for intensity,rgb in colors:
         colorTransfer.AddRGBPoint(intensity, *rgb)
       volumePropertyNode.SetScalarOpacity(scalarOpacity)
@@ -793,20 +794,25 @@ class ShaderComputationTest(ScriptedLoadableModuleTest):
           vec3 color;
           float opacity;
           transferFunction(sample, gradientMagnitude, color, opacity);
+          opacity *= %(sampleStep)f;
 
-          if (tCurrent < 30.) {
-            opacity = 0.;
-          }
-
-          integratedPixel.rgb = mix(color, integratedPixel.rgb, integratedPixel.a);
-          integratedPixel.a += opacity * %(sampleStep)f;
+          /*
+          // http://graphicsrunner.blogspot.com/2009/01/volume-rendering-101.html
+          //Front to back blending
+          // dst.rgb = dst.rgb + (1 - dst.a) * src.a * src.rgb
+          // dst.a   = dst.a   + (1 - dst.a) * src.a
+          src.rgb *= src.a;
+          dst = (1.0f - dst.a)*src + dst;
+          */
+          integratedPixel.rgb += (1. - integratedPixel.a) * opacity * color;
+          integratedPixel.a += (1. - integratedPixel.a) * opacity;
           integratedPixel = clamp(integratedPixel, 0., 1.);
 
           tCurrent += %(sampleStep)f;
           if (
               tCurrent >= tFar  // stepped out of the volume
                 ||
-              integratedPixel.a > 1.  // pixel is saturated
+              integratedPixel.a >= 1.  // pixel is saturated
           ) {
             break; // we can stop now
           }

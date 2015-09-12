@@ -221,14 +221,6 @@ class ShaderComputationTest(ScriptedLoadableModuleTest):
       uniform sampler3D volumeSampler;
       void main()
       {
-      /*
-        gl_FragColor = vec4 ( 1.0, 0.0, 0.0, 1.0 );
-        gl_FragColor = interpolatedColor;
-        vec4 volumeSample = texture3D(volumeSampler, interpolatedTextureCoordinate);
-        volumeSample *= 100;
-        gl_FragColor = mix( volumeSample, interpolatedColor, 0.5);
-      */
-
         vec4 integratedRay = vec4(0.);
         for (int i = 0; i < 256; i++) {
           vec3 samplePoint = vec3(interpolatedTextureCoordinate.st, i/256.);
@@ -320,12 +312,12 @@ class ShaderComputationTest(ScriptedLoadableModuleTest):
 
     # conservative guesses:
     # sampleStep is in mm, shortest side in world space divided by max volume dimension
-    # gradientSize is in [0,1] texture sapce, sampleStep divided by max volume dimensions
+    # gradientSize is in [0,1] texture space, sampleStep divided by max volume dimensions
 
     rasMinSide = min(rasBoxMax[0] - rasBoxMin[0], rasBoxMax[1] - rasBoxMin[1], rasBoxMax[2] - rasBoxMin[2])
     maxDimension = max(volumeNode.GetImageData().GetDimensions())
-    parameters['sampleStep'] = .25 * rasMinSide / maxDimension
-    parameters['gradientSize'] = parameters['sampleStep'] / maxDimension
+    parameters['sampleStep'] = 1. * rasMinSide / maxDimension
+    parameters['gradientSize'] = .5 * parameters['sampleStep'] / maxDimension
 
     # get the camera parameters from default 3D window
     layoutManager = slicer.app.layoutManager()
@@ -336,19 +328,21 @@ class ShaderComputationTest(ScriptedLoadableModuleTest):
     renderer = renderers.GetItemAsObject(0)
     camera = renderer.GetActiveCamera()
 
+    import math
     import numpy
     viewPosition = numpy.array(camera.GetPosition())
     focalPoint = numpy.array(camera.GetFocalPoint())
     viewDistance = numpy.linalg.norm(focalPoint - viewPosition)
     viewNormal = (focalPoint - viewPosition) / viewDistance
-    viewUp = numpy.array(camera.GetViewUp())
     viewAngle = camera.GetViewAngle()
+    viewUp = numpy.array(camera.GetViewUp())
     viewRight = numpy.cross(viewNormal,viewUp)
 
     parameters['eyeRayOrigin'] = "%f, %f, %f" % (viewPosition[0], viewPosition[1], viewPosition[2])
     parameters['viewNormal'] = "%f, %f, %f" % (viewNormal[0], viewNormal[1], viewNormal[2])
     parameters['viewRight'] = "%f, %f, %f" % (viewRight[0], viewRight[1], viewRight[2])
     parameters['viewUp'] = "%f, %f, %f" % (viewUp[0], viewUp[1], viewUp[2])
+    parameters['halfSinViewAngle'] = "%f" % (0.5 * math.cos(math.radians(viewAngle)))
 
     return parameters
 
@@ -459,10 +453,11 @@ class ShaderComputationTest(ScriptedLoadableModuleTest):
 
     if False:
       ellipsoid = vtk.vtkImageEllipsoidSource()
-      ellipsoid.SetInValue(255)
+      ellipsoid.SetInValue(200)
       ellipsoid.SetOutValue(0)
       ellipsoid.SetOutputScalarTypeToShort()
-      ellipsoid.SetWholeExtent(0, 255, 0, 255, 0, 255)
+      ellipsoid.SetCenter(270,270,170)
+      ellipsoid.SetWholeExtent(volumeToRender.GetImageData().GetExtent())
       ellipsoid.Update()
       volumeToRender.SetAndObserveImageData(ellipsoid.GetOutputDataObject(0))
 
@@ -544,19 +539,20 @@ class ShaderComputationTest(ScriptedLoadableModuleTest):
         // read from 3D texture
         sample = textureSampleDenormalized(volumeSampler, stpPoint);
 
-        // central difference sample gradient (N is -1)
-        float s100 = textureSampleDenormalized(volumeSampler, stpPoint + vec3(gradientSize,0,0));
+        // central difference sample gradient (P is +1, N is -1)
+        float sP00 = textureSampleDenormalized(volumeSampler, stpPoint + vec3(gradientSize,0,0));
         float sN00 = textureSampleDenormalized(volumeSampler, stpPoint - vec3(gradientSize,0,0));
-        float s010 = textureSampleDenormalized(volumeSampler, stpPoint + vec3(0,gradientSize,0));
+        float s0P0 = textureSampleDenormalized(volumeSampler, stpPoint + vec3(0,gradientSize,0));
         float s0N0 = textureSampleDenormalized(volumeSampler, stpPoint - vec3(0,gradientSize,0));
-        float s001 = textureSampleDenormalized(volumeSampler, stpPoint + vec3(0,0,gradientSize));
+        float s00P = textureSampleDenormalized(volumeSampler, stpPoint + vec3(0,0,gradientSize));
         float s00N = textureSampleDenormalized(volumeSampler, stpPoint - vec3(0,0,gradientSize));
 
 
         // TODO normal should be transformed back to RAS
-        vec3 gradient = vec3( (s100-sN00),
-                              (s010-s0N0),
-                              (s001-s00N)) / vec3(2. * gradientSize);
+        vec3 gradient = vec3( (sP00-sN00),
+                              (s0P0-s0N0),
+                              (s00P-s00N) );
+
         gradientMagnitude = length(gradient);
         normal = (-1. / gradientMagnitude) * gradient;
       }
@@ -567,13 +563,13 @@ class ShaderComputationTest(ScriptedLoadableModuleTest):
       volumePropertyNode = slicer.vtkMRMLVolumePropertyNode()
       volumePropertyNode.SetName('ShaderVolumeProperty')
       scalarOpacity = vtk.vtkPiecewiseFunction()
-      points = ( (-1024., 0.), (20., 0.), (300., .1), (3532., .1) )
+      points = ( (-1024., 0.), (20., 0.), (300., 1.), (3532., 1.) )
       for point in points:
         scalarOpacity.AddPoint(*point)
       volumePropertyNode.SetScalarOpacity(scalarOpacity)
       colorTransfer = vtk.vtkColorTransferFunction()
+      colors = ( (-1024., (0., 0., 0.)), (3., (0., 0., 0.)), (131., (1., 1., 0.)) )
       colors = ( (-1024., (0., 0., 0.)), (-984., (0., 0., 0.)), (469., (1., 1., 1.)) )
-      colors = ( (-1024., (0., 0., 0.)), (3., (0., 0., 0.)), (131., (1., 1., 1.)) )
       for intensity,rgb in colors:
         colorTransfer.AddRGBPoint(intensity, *rgb)
       volumePropertyNode.SetScalarOpacity(scalarOpacity)
@@ -585,146 +581,6 @@ class ShaderComputationTest(ScriptedLoadableModuleTest):
     rayCastParameters.update({
           'rayMaxSteps' : 500000,
     }) # TODO: auto calculate ray parameters
-    rayCastSource = """
-      // volume ray caster - starts from the front and collects color and opacity
-      // contributions until fully saturated.
-      // Sample coordinate is 0->1 texture space
-      vec4 rayCast( in vec3 sampleCoordinate, in sampler3D volumeSampler )
-      {
-        // TODO aspect: float aspect = imageW / (1.0 * imageH);
-        vec2 normalizedCoordinate = 2. * (sampleCoordinate.st -.5);
-
-        // calculate eye ray in world space
-        vec3 eyeRayOrigin = vec3(%(eyeRayOrigin)s);
-        vec3 eyeRayDirection;
-
-        // ||viewNormal + u * viewRight + v * viewUp||
-
-        eyeRayDirection = normalize (                            vec3( %(viewNormal)s )
-                                      + normalizedCoordinate.x * vec3( %(viewRight)s  )
-                                      + normalizedCoordinate.y * vec3( %(viewUp)s     ) );
-
-
-        vec3 pointLight = vec3(-250., 250., 400.); // TODO
-
-        // find intersection with box, possibly terminate early
-        float tNear, tFar;
-        vec3 rasBoxMin = vec3( %(rasBoxMin)s );
-        vec3 rasBoxMax = vec3( %(rasBoxMax)s );
-        bool hit = intersectBox( eyeRayOrigin, eyeRayDirection, rasBoxMin, rasBoxMax, tNear, tFar );
-        if (!hit) {
-          return vec4(0.,0.,.5,1.); // TODO: mid blue background for now
-        }
-
-        if (tNear < 0.) tNear = 0.;     // clamp to near plane
-
-        // march along ray from front, accumulating color and opacity
-        vec4 integratedPixel = vec4(0.);
-        float gradientSize = %(gradientSize)f;
-        float tCurrent = tNear;
-        float sample;
-        int rayStep;
-        for(rayStep = 0; rayStep < %(rayMaxSteps)d; rayStep++) {
-
-          vec3 samplePoint = eyeRayOrigin + eyeRayDirection * tCurrent;
-
-          // TODO: add a vector field proportional to rayStep, u, v
-          /*
-          vec4 vectorField;
-          float blend = rayStep * 1000. / %(rayMaxSteps)d;
-          vectorField.x = blend * sin(90. * u) + cos(90. * v);
-          vectorField.y = blend * -cos(90. * u) + sin(90. * v);
-          vectorField.z = 0.;
-          //samplePoint += vectorField;
-          */
-
-          vec3 normal;
-          float gradientMagnitude;
-          sampleVolume(volumeSampler, samplePoint, gradientSize, sample, normal, gradientMagnitude);
-
-
-          // Phong lighting
-          // http://en.wikipedia.org/wiki/Phong_reflection_model
-          vec3 Cdiffuse = vec3(1.,1.,0.);
-          vec3 Cspecular = vec3(1.,1.,1.);
-          float Kdiffuse = .85;
-          float Kspecular = .15;
-          float Shininess = 55.;
-
-          vec3 phongColor = vec3(0.);
-          vec3 V = normalize(eyeRayOrigin - samplePoint);
-          if (dot(V, normal) > 0.) {
-            vec3 L = normalize(pointLight - samplePoint);
-            vec3 R = reflect(L,normal);
-            phongColor += Kdiffuse * dot(L,normal) * Cdiffuse;
-            phongColor += Kspecular * pow( dot(R,V), Shininess ) * Cspecular;
-          }
-
-          /*
-          vec4 color;
-          color = vec4(phongColor, 1.);
-          */
-
-          // accumulate result
-
-          float sampleEmission = %(sampleStep)f * sample / 10000.;
-          float sampleOpacity = %(sampleStep)f * sample / 100.;
-
-
-          vec3 color;
-          float opacity = 0.;
-          transferFunction(sample, gradientMagnitude, color, opacity);
-
-          // Ray sum
-          /*
-          if (opacity > 0.) {
-            //integratedPixel.rgb += color;
-            integratedPixel.rgb += color * opacity;
-          }
-          */
-
-          // gradient sum
-          //integratedPixel.rgb += vec3(sqrt(gradientMagnitude) * normalize(abs(normal)) );
-          //integratedPixel.rgb += vec3(sqrt(gradientMagnitude));
-
-          integratedPixel.a += opacity;
-          integratedPixel.rgb += integratedPixel.a * opacity * phongColor.rgb;
-
-
-
-/*
-          // scalar
-          //integratedPixel.rgb += (1. - integratedPixel.a) * mix(vec3(sampleEmission), phongColor, 0.000005);
-          integratedPixel.rgb += 0.1 * integratedPixel.a * sampleOpacity * color + 0.1 * phongColor;
-          integratedPixel.a += 0.1 * sampleOpacity;
-
-          // Phong tests
-          //integratedPixel.rgb += (1. - integratedPixel.a) * mix(vec3(sampleEmission/1000.), color.rgb, 0.5);
-          //integratedPixel.rgb += (1. - integratedPixel.a) * color.rgb / 1.;
-          //integratedPixel.a += %(sampleStep)f * gradientMagnitude/1000.;
-          //integratedPixel.a += %(sampleStep)f * sampleOpacity;
-*/
-          tCurrent += %(sampleStep)f;
-          if (
-              tCurrent >= tFar  // stepped out of the volume
-                ||
-              integratedPixel.a > 1.  // pixel is saturated
-          ) {
-            break; // we can stop now
-          }
-        }
-        if (integratedPixel.a > 0.) {
-          return(vec4(1.);
-        }
-        integratedPixel /= 0.1 * rayStep;
-        integratedPixel = clamp(integratedPixel, 0., 1.);
-        return(vec4(integratedPixel.rgb, 1.));
-        //return (vec4(1. - integratedPixel.rgb, 1.));
-        //return (vec4 (mix(integratedPixel.rgb, vec3(.1, .1, 0.), 1.-integratedPixel.a), 1.));
-      }
-    """ % rayCastParameters
-
-    # simplified for debugging
     rayCastSource = """
       // volume ray caster - starts from the front and collects color and opacity
       // contributions until fully saturated.
@@ -743,11 +599,11 @@ class ShaderComputationTest(ScriptedLoadableModuleTest):
         // ||viewNormal + u * viewRight + v * viewUp||
 
         eyeRayDirection = normalize (                            vec3( %(viewNormal)s )
-                                      + normalizedCoordinate.x * vec3( %(viewRight)s  )
-                                      + normalizedCoordinate.y * vec3( %(viewUp)s     ) );
+                                      + ( %(halfSinViewAngle)s * normalizedCoordinate.x * vec3( %(viewRight)s ) )
+                                      + ( %(halfSinViewAngle)s * normalizedCoordinate.y * vec3( %(viewUp)s    ) ) );
 
 
-        vec3 pointLight = vec3(-250., 250., 400.); // TODO
+        vec3 pointLight = vec3(0., 2500., 1000.); // TODO
 
         // find intersection with box, possibly terminate early
         float tNear, tFar;
@@ -773,17 +629,26 @@ class ShaderComputationTest(ScriptedLoadableModuleTest):
           vec3 normal;
           float gradientMagnitude;
           sampleVolume(volumeSampler, samplePoint, gradientSize, sample, normal, gradientMagnitude);
+          vec3 color;
+          float opacity;
+          transferFunction(sample, gradientMagnitude, color, opacity);
+          opacity *= %(sampleStep)f;
 
           // Phong lighting
           // http://en.wikipedia.org/wiki/Phong_reflection_model
-          vec3 Cdiffuse = vec3(1.,1.,0.);
+          //vec3 Cdiffuse = vec3(1.,1.,0.);
+          vec3 Cambient = color;
+          vec3 Cdiffuse = color;
           vec3 Cspecular = vec3(1.,1.,1.);
-          float Kdiffuse = .85;
-          float Kspecular = .15;
-          float Shininess = 55.;
+          float Kambient = .20;
+          float Kdiffuse = .65;
+          float Kspecular = .70;
+          float Shininess = 15.;
 
-          vec3 phongColor = vec3(0.);
+          vec3 phongColor = Kambient * Cambient;
           vec3 pointToEye = normalize(eyeRayOrigin - samplePoint);
+
+
           if (dot(pointToEye, normal) > 0.) {
             vec3 pointToLight = normalize(pointLight - samplePoint);
             vec3 lightReflection = reflect(pointToLight,normal);
@@ -791,20 +656,8 @@ class ShaderComputationTest(ScriptedLoadableModuleTest):
             phongColor += Kspecular * pow( dot(lightReflection,pointToEye), Shininess ) * Cspecular;
           }
 
-          vec3 color;
-          float opacity;
-          transferFunction(sample, gradientMagnitude, color, opacity);
-          opacity *= %(sampleStep)f;
-
-          /*
           // http://graphicsrunner.blogspot.com/2009/01/volume-rendering-101.html
-          //Front to back blending
-          // dst.rgb = dst.rgb + (1 - dst.a) * src.a * src.rgb
-          // dst.a   = dst.a   + (1 - dst.a) * src.a
-          src.rgb *= src.a;
-          dst = (1.0f - dst.a)*src + dst;
-          */
-          integratedPixel.rgb += (1. - integratedPixel.a) * opacity * color;
+          integratedPixel.rgb += (1. - integratedPixel.a) * opacity * phongColor;
           integratedPixel.a += (1. - integratedPixel.a) * opacity;
           integratedPixel = clamp(integratedPixel, 0., 1.);
 
@@ -851,7 +704,7 @@ class ShaderComputationTest(ScriptedLoadableModuleTest):
     self.shaderComputation.SetTextureImageData(volumeToRender.GetImageData())
 
     resultImage = vtk.vtkImageData()
-    resultImage.SetDimensions(1024, 1024, 1)
+    resultImage.SetDimensions(512, 512, 1)
     resultImage.AllocateScalars(vtk.VTK_UNSIGNED_CHAR, 4)
     self.shaderComputation.SetResultImageData(resultImage)
 

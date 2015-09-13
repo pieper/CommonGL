@@ -462,6 +462,21 @@ class ShaderComputationTest(ScriptedLoadableModuleTest):
       self.ellipsoid.Update()
       volumeToRender.SetAndObserveImageData(self.ellipsoid.GetOutputDataObject(0))
 
+    # since the OpenGL texture will be floats in the range 0 to 1, all negative values
+    # will get clamped to zero.  Also if the sample values aren't evenly spread through
+    # the zero to one space we may run into numerical issues.  So rescale the data to the
+    # to fit in the full range of the a 16 bit short.
+    if not hasattr(self,"shiftScale"):
+      self.shiftScale = vtk.vtkImageShiftScale()
+    self.shiftScale.SetInputData(volumeToRender.GetImageData())
+    self.shiftScale.SetOutputScalarTypeToUnsignedShort()
+    low, high = volumeToRender.GetImageData().GetScalarRange()
+    self.shiftScale.SetShift(-low)
+    scale = (1. * vtk.VTK_UNSIGNED_SHORT_MAX) / (high-low)
+    self.shiftScale.SetScale(scale)
+    sampleUnshift = low
+    sampleUnscale = high-low
+
     if not hasattr(self,"shaderComputation") and hasattr(slicer.modules.ShaderComputationInstance, "test"):
       oldSelf = slicer.modules.ShaderComputationInstance.test
       oldSelf.renderWindow.RemoveObserver(oldSelf.renderTag)
@@ -518,9 +533,14 @@ class ShaderComputationTest(ScriptedLoadableModuleTest):
       }
     """
 
+    sampleVolumeParameters = self.sampleVolumeParameters(volumeToRender)
+    sampleVolumeParameters.update({
+          'sampleUnshift' : sampleUnshift,
+          'sampleUnscale' : sampleUnscale,
+    })
     sampleVolumeSource = """
       float textureSampleDenormalized(const in sampler3D volumeSampler, const in vec3 stpPoint) {
-        return ( texture3D(volumeSampler, stpPoint).r * %(scalarTypeMax)f );
+        return ( texture3D(volumeSampler, stpPoint).r * %(sampleUnscale)f + %(sampleUnshift)f );
       }
 
       void sampleVolume(const in sampler3D volumeSampler, const in vec3 samplePoint, const in float gradientSize,
@@ -557,7 +577,7 @@ class ShaderComputationTest(ScriptedLoadableModuleTest):
         gradientMagnitude = length(gradient);
         normal = (-1. / gradientMagnitude) * gradient;
       }
-    """ % self.sampleVolumeParameters(volumeToRender)
+    """ % sampleVolumeParameters
 
     volumePropertyNode = slicer.util.getNode('ShaderVolumeProperty')
     if not volumePropertyNode:
@@ -581,7 +601,7 @@ class ShaderComputationTest(ScriptedLoadableModuleTest):
     rayCastParameters = self.rayCastVolumeParameters(volumeToRender)
     rayCastParameters.update({
           'rayMaxSteps' : 500000,
-    }) # TODO: auto calculate ray parameters
+    })
     rayCastSource = """
       // volume ray caster - starts from the front and collects color and opacity
       // contributions until fully saturated.
@@ -702,7 +722,8 @@ class ShaderComputationTest(ScriptedLoadableModuleTest):
       fp.write(self.shaderComputation.GetFragmentShaderSource())
       fp.close()
 
-    self.shaderComputation.SetTextureImageData(volumeToRender.GetImageData())
+    self.shiftScale.Update()
+    self.shaderComputation.SetTextureImageData(self.shiftScale.GetOutputDataObject(0))
 
     resultImage = vtk.vtkImageData()
     resultImage.SetDimensions(512, 512, 1)

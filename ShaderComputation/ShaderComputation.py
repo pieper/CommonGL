@@ -451,15 +451,16 @@ class ShaderComputationTest(ScriptedLoadableModuleTest):
       print("Getting Volume")
       volumeToRender = method()
 
-    if False:
-      ellipsoid = vtk.vtkImageEllipsoidSource()
-      ellipsoid.SetInValue(200)
-      ellipsoid.SetOutValue(0)
-      ellipsoid.SetOutputScalarTypeToShort()
-      ellipsoid.SetCenter(270,270,170)
-      ellipsoid.SetWholeExtent(volumeToRender.GetImageData().GetExtent())
-      ellipsoid.Update()
-      volumeToRender.SetAndObserveImageData(ellipsoid.GetOutputDataObject(0))
+    if True:
+      if not hasattr(self,"ellipsoid"):
+        self.ellipsoid = vtk.vtkImageEllipsoidSource()
+      self.ellipsoid.SetInValue(200)
+      self.ellipsoid.SetOutValue(0)
+      self.ellipsoid.SetOutputScalarTypeToShort()
+      self.ellipsoid.SetCenter(270,270,170)
+      self.ellipsoid.SetWholeExtent(volumeToRender.GetImageData().GetExtent())
+      self.ellipsoid.Update()
+      volumeToRender.SetAndObserveImageData(self.ellipsoid.GetOutputDataObject(0))
 
     if not hasattr(self,"shaderComputation") and hasattr(slicer.modules.ShaderComputationInstance, "test"):
       oldSelf = slicer.modules.ShaderComputationInstance.test

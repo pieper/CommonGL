@@ -444,14 +444,14 @@ class ShaderComputationTest(ScriptedLoadableModuleTest):
 
     import SampleData
     sampleDataLogic = SampleData.SampleDataLogic()
-    name, method = 'MRHead', sampleDataLogic.downloadMRHead
     name, method = 'CTACardio', sampleDataLogic.downloadCTACardio
+    name, method = 'MRHead', sampleDataLogic.downloadMRHead
     volumeToRender = slicer.util.getNode(name)
     if not volumeToRender:
       print("Getting Volume")
       volumeToRender = method()
 
-    if True:
+    if False:
       if not hasattr(self,"ellipsoid"):
         self.ellipsoid = vtk.vtkImageEllipsoidSource()
       self.ellipsoid.SetInValue(200)
@@ -624,7 +624,7 @@ class ShaderComputationTest(ScriptedLoadableModuleTest):
                                       + ( %(halfSinViewAngle)s * normalizedCoordinate.y * vec3( %(viewUp)s    ) ) );
 
 
-        vec3 pointLight = vec3(0., 2500., 1000.); // TODO
+        vec3 pointLight = vec3(20000., 2500., 1000.); // TODO
 
         // find intersection with box, possibly terminate early
         float tNear, tFar;
@@ -672,9 +672,13 @@ class ShaderComputationTest(ScriptedLoadableModuleTest):
 
           if (dot(pointToEye, normal) > 0.) {
             vec3 pointToLight = normalize(pointLight - samplePoint);
+            float lightDot = dot(pointToLight,normal);
             vec3 lightReflection = reflect(pointToLight,normal);
-            phongColor += Kdiffuse * dot(pointToLight,normal) * Cdiffuse;
-            phongColor += Kspecular * pow( dot(lightReflection,pointToEye), Shininess ) * Cspecular;
+            float reflectDot = dot(lightReflection,pointToEye);
+            if (lightDot > 0.) {
+              phongColor += Kdiffuse * lightDot * Cdiffuse;
+              phongColor += Kspecular * pow( reflectDot, Shininess ) * Cspecular;
+            }
           }
 
           // http://graphicsrunner.blogspot.com/2009/01/volume-rendering-101.html

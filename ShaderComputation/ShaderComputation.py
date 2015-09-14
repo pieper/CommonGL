@@ -312,8 +312,6 @@ class ShaderComputationTest(ScriptedLoadableModuleTest):
         parameters['normalSTPToRAS'] += "%f," % normalSTPToRAS.GetElement(row,column)
     parameters['normalSTPToRAS'] = parameters['normalSTPToRAS'][:-1] # clear trailing comma
 
-    print(parameters)
-
     return parameters
 
   def rayCastVolumeParameters(self,volumeNode):

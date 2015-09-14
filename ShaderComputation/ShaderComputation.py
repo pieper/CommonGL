@@ -277,7 +277,8 @@ class ShaderComputationTest(ScriptedLoadableModuleTest):
     ijkToSTP.Identity()
     for diagonal in range(3):
       ijkToSTP.SetElement(diagonal,diagonal, 1./dimensions[diagonal])
-    ijkToSTP.Multiply4x4(ijkToSTP, rasToIJK, rasToIJK)
+    rasToSTP = vtk.vtkMatrix4x4()
+    ijkToSTP.Multiply4x4(ijkToSTP, rasToIJK, rasToSTP)
 
     parameters = {}
     rows = ('rasToS', 'rasToT', 'rasToP')
@@ -285,11 +286,33 @@ class ShaderComputationTest(ScriptedLoadableModuleTest):
       rowKey = rows[row]
       parameters[rowKey] = ""
       for col in range(4):
-        element = rasToIJK.GetElement(row,col)
+        element = rasToSTP.GetElement(row,col)
         parameters[rowKey] += "%f," % element
       parameters[rowKey] = parameters[rowKey][:-1] # clear trailing comma
 
-    parameters['scalarTypeMax'] = 32767. # TODO: get this from scalar type
+    # since texture is 0-1, take into account both pixel spacing
+    # and dimension as layed out in memory so that the normals
+    # is calculated in a uniform space
+    spacings = volumeNode.GetSpacing()
+    parameters['mmToS'] = spacings[0] / dimensions[0]
+    parameters['mmToT'] = spacings[1] / dimensions[1]
+    parameters['mmToP'] = spacings[2] / dimensions[2]
+
+    # the inverse transpose of the upper 3x3 of the stpToRAS matrix,
+    # which is the transpose of the upper 3x3 of the rasTSTP matrix
+    normalSTPToRAS = vtk.vtkMatrix3x3();
+    for row in range(3):
+      for column in range(3):
+        normalSTPToRAS.SetElement(row,column, rasToSTP.GetElement(row,column));
+    normalSTPToRAS.Transpose()
+    parameters['normalSTPToRAS'] = ''
+    for column in range(3):
+      for row in range(3):
+        # write in column-major order for glsl mat3 constructor
+        parameters['normalSTPToRAS'] += "%f," % normalSTPToRAS.GetElement(row,column)
+    parameters['normalSTPToRAS'] = parameters['normalSTPToRAS'][:-1] # clear trailing comma
+
+    print(parameters)
 
     return parameters
 
@@ -317,7 +340,8 @@ class ShaderComputationTest(ScriptedLoadableModuleTest):
     rasMinSide = min(rasBoxMax[0] - rasBoxMin[0], rasBoxMax[1] - rasBoxMin[1], rasBoxMax[2] - rasBoxMin[2])
     maxDimension = max(volumeNode.GetImageData().GetDimensions())
     parameters['sampleStep'] = 1. * rasMinSide / maxDimension
-    parameters['gradientSize'] = .5 * parameters['sampleStep'] / maxDimension
+    minSpacing = min(volumeNode.GetSpacing())
+    parameters['gradientSize'] = .5 * minSpacing
 
     # get the camera parameters from default 3D window
     layoutManager = slicer.app.layoutManager()
@@ -557,25 +581,34 @@ class ShaderComputationTest(ScriptedLoadableModuleTest):
         stpPoint.t = dot(rasToT,sampleCoordinate);
         stpPoint.p = dot(rasToP,sampleCoordinate);
 
+        #define S(point) textureSampleDenormalized(volumeSampler, point)
+
         // read from 3D texture
-        sample = textureSampleDenormalized(volumeSampler, stpPoint);
+        sample = S(stpPoint);
 
         // central difference sample gradient (P is +1, N is -1)
-        float sP00 = textureSampleDenormalized(volumeSampler, stpPoint + vec3(gradientSize,0,0));
-        float sN00 = textureSampleDenormalized(volumeSampler, stpPoint - vec3(gradientSize,0,0));
-        float s0P0 = textureSampleDenormalized(volumeSampler, stpPoint + vec3(0,gradientSize,0));
-        float s0N0 = textureSampleDenormalized(volumeSampler, stpPoint - vec3(0,gradientSize,0));
-        float s00P = textureSampleDenormalized(volumeSampler, stpPoint + vec3(0,0,gradientSize));
-        float s00N = textureSampleDenormalized(volumeSampler, stpPoint - vec3(0,0,gradientSize));
+        float sP00 = S(stpPoint + vec3(%(mmToS)f * gradientSize,0,0));
+        float sN00 = S(stpPoint - vec3(%(mmToS)f * gradientSize,0,0));
+        float s0P0 = S(stpPoint + vec3(0,%(mmToT)f * gradientSize,0));
+        float s0N0 = S(stpPoint - vec3(0,%(mmToT)f * gradientSize,0));
+        float s00P = S(stpPoint + vec3(0,0,%(mmToP)f * gradientSize));
+        float s00N = S(stpPoint - vec3(0,0,%(mmToP)f * gradientSize));
 
+        // TODO: add Sobel option to filter gradient
+        // https://en.wikipedia.org/wiki/Sobel_operator#Extension_to_other_dimensions
 
-        // TODO normal should be transformed back to RAS
         vec3 gradient = vec3( (sP00-sN00),
                               (s0P0-s0N0),
                               (s00P-s00N) );
 
         gradientMagnitude = length(gradient);
-        normal = (-1. / gradientMagnitude) * gradient;
+
+        // https://en.wikipedia.org/wiki/Normal_(geometry)#Transforming_normals
+        mat3 normalSTPToRAS = mat3(%(normalSTPToRAS)s);
+        vec3 localNormal;
+        localNormal = (-1. / gradientMagnitude) * gradient;
+        normal = normalize(normalSTPToRAS * localNormal);
+
       }
     """ % sampleVolumeParameters
 
@@ -730,7 +763,7 @@ class ShaderComputationTest(ScriptedLoadableModuleTest):
     self.shaderComputation.SetTextureImageData(self.shiftScale.GetOutputDataObject(0))
 
     resultImage = vtk.vtkImageData()
-    resultImage.SetDimensions(512, 512, 1)
+    resultImage.SetDimensions(1024, 1024, 1)
     resultImage.AllocateScalars(vtk.VTK_UNSIGNED_CHAR, 4)
     self.shaderComputation.SetResultImageData(resultImage)
 

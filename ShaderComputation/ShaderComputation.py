@@ -53,84 +53,77 @@ class ShaderComputationWidget(ScriptedLoadableModuleWidget):
     parametersFormLayout = qt.QFormLayout(parametersCollapsibleButton)
 
     #
-    # input volume selector
+    # render volume selector
     #
-    self.inputSelector = slicer.qMRMLNodeComboBox()
-    self.inputSelector.nodeTypes = ["vtkMRMLScalarVolumeNode"]
-    self.inputSelector.selectNodeUponCreation = True
-    self.inputSelector.addEnabled = False
-    self.inputSelector.removeEnabled = False
-    self.inputSelector.noneEnabled = False
-    self.inputSelector.showHidden = False
-    self.inputSelector.showChildNodeTypes = False
-    self.inputSelector.setMRMLScene( slicer.mrmlScene )
-    self.inputSelector.setToolTip( "Pick the input to the algorithm." )
-    parametersFormLayout.addRow("Input Volume: ", self.inputSelector)
+    self.renderSelector = slicer.qMRMLNodeComboBox()
+    self.renderSelector.nodeTypes = ["vtkMRMLScalarVolumeNode"]
+    self.renderSelector.selectNodeUponCreation = True
+    self.renderSelector.addEnabled = False
+    self.renderSelector.removeEnabled = False
+    self.renderSelector.noneEnabled = False
+    self.renderSelector.showHidden = False
+    self.renderSelector.showChildNodeTypes = False
+    self.renderSelector.setMRMLScene( slicer.mrmlScene )
+    self.renderSelector.setToolTip( "Pick volume to render." )
+    parametersFormLayout.addRow("Render Volume: ", self.renderSelector)
 
     #
-    # output volume selector
+    # amplitude value
     #
-    self.outputSelector = slicer.qMRMLNodeComboBox()
-    self.outputSelector.nodeTypes = ["vtkMRMLScalarVolumeNode"]
-    self.outputSelector.selectNodeUponCreation = True
-    self.outputSelector.addEnabled = True
-    self.outputSelector.removeEnabled = True
-    self.outputSelector.noneEnabled = True
-    self.outputSelector.showHidden = False
-    self.outputSelector.showChildNodeTypes = False
-    self.outputSelector.setMRMLScene( slicer.mrmlScene )
-    self.outputSelector.setToolTip( "Pick the output to the algorithm." )
-    parametersFormLayout.addRow("Output Volume: ", self.outputSelector)
+    self.transformAmplitude = ctk.ctkSliderWidget()
+    self.transformAmplitude.singleStep = 0.01
+    self.transformAmplitude.minimum = -10
+    self.transformAmplitude.maximum = 10
+    self.transformAmplitude.value = 0.
+    self.transformAmplitude.setToolTip("Amount of the transform to apply")
+    parametersFormLayout.addRow("Transform Amplitude", self.transformAmplitude)
 
     #
-    # threshold value
+    # frequency value
     #
-    self.imageThresholdSliderWidget = ctk.ctkSliderWidget()
-    self.imageThresholdSliderWidget.singleStep = 0.1
-    self.imageThresholdSliderWidget.minimum = -100
-    self.imageThresholdSliderWidget.maximum = 100
-    self.imageThresholdSliderWidget.value = 0.5
-    self.imageThresholdSliderWidget.setToolTip("Set threshold value for computing the output image. Voxels that have intensities lower than this value will set to zero.")
-    parametersFormLayout.addRow("Image threshold", self.imageThresholdSliderWidget)
+    self.transformFrequency = ctk.ctkSliderWidget()
+    self.transformFrequency.singleStep = 0.001
+    self.transformFrequency.minimum = -1
+    self.transformFrequency.maximum = 1
+    self.transformFrequency.value = 0.
+    self.transformFrequency.setToolTip("Frequency the transform")
+    parametersFormLayout.addRow("Transform Frequency", self.transformFrequency)
 
     #
-    # check box to trigger taking screen shots for later use in tutorials
+    # check box to apply transform
     #
-    self.enableScreenshotsFlagCheckBox = qt.QCheckBox()
-    self.enableScreenshotsFlagCheckBox.checked = 0
-    self.enableScreenshotsFlagCheckBox.setToolTip("If checked, take screen shots for tutorials. Use Save Data to write them to disk.")
-    parametersFormLayout.addRow("Enable Screenshots", self.enableScreenshotsFlagCheckBox)
-
-    #
-    # Apply Button
-    #
-    self.applyButton = qt.QPushButton("Apply")
-    self.applyButton.toolTip = "Run the algorithm."
-    self.applyButton.enabled = False
-    parametersFormLayout.addRow(self.applyButton)
+    self.applyTransformCheckBox = qt.QCheckBox()
+    self.applyTransformCheckBox.checked = 0
+    self.applyTransformCheckBox.setToolTip("If checked, render with transform applied.")
+    parametersFormLayout.addRow("Apply Transform", self.applyTransformCheckBox)
 
     # connections
-    self.applyButton.connect('clicked(bool)', self.onApplyButton)
-    self.inputSelector.connect("currentNodeChanged(vtkMRMLNode*)", self.onSelect)
-    self.outputSelector.connect("currentNodeChanged(vtkMRMLNode*)", self.onSelect)
+    self.renderSelector.connect("currentNodeChanged(vtkMRMLNode*)", self.onChange)
+    self.transformAmplitude.connect("valueChanged(double)", self.onChange)
+    self.transformFrequency.connect("valueChanged(double)", self.onChange)
+    self.applyTransformCheckBox.connect("toggled(bool)", self.onChange)
 
     # Add vertical spacer
     self.layout.addStretch(1)
 
-    # Refresh Apply button state
-    self.onSelect()
-
   def cleanup(self):
     pass
 
-  def onSelect(self):
-    self.applyButton.enabled = self.inputSelector.currentNode() and self.outputSelector.currentNode()
+  def onChange(self):
+    """Perform the render when any input changes"""
+    if not hasattr(self,'computationTester'):
+      self.computationTester = ShaderComputationTest()
+    volume = self.renderSelector.currentNode()
+    amplitude = 0.
+    frequency = 0.
+    if self.applyTransformCheckBox.checked:
+      amplitude = self.transformAmplitude.value
+      frequency = self.transformFrequency.value
+    self.computationTester.test_ShaderComputation2( volumeToRender=self.renderSelector.currentNode(),
+                                               transformAmplitude=amplitude,
+                                               transformFrequency=frequency)
 
-  def onApplyButton(self):
-    logic = ShaderComputationLogic()
-    enableScreenshotsFlag = self.enableScreenshotsFlagCheckBox.checked
-    imageThreshold = self.imageThresholdSliderWidget.value
-    logic.run(self.inputSelector.currentNode(), self.outputSelector.currentNode(), imageThreshold, enableScreenshotsFlag)
+
 
 #
 # ShaderComputationLogic
@@ -452,7 +445,7 @@ class ShaderComputationTest(ScriptedLoadableModuleTest):
     return source
 
 
-  def test_ShaderComputation2(self, caller=None, event=None):
+  def test_ShaderComputation2(self, caller=None, event=None, volumeToRender=None, transformAmplitude=None, transformFrequency=None):
     """ Ideally you should have several levels of tests.  At the lowest level
     tests should exercise the functionality of the logic with different inputs
     (both valid and invalid).  At higher levels your tests should emulate the
@@ -464,14 +457,29 @@ class ShaderComputationTest(ScriptedLoadableModuleTest):
     your test should break so they know that the feature is needed.
     """
 
-    import SampleData
-    sampleDataLogic = SampleData.SampleDataLogic()
-    name, method = 'CTACardio', sampleDataLogic.downloadCTACardio
-    name, method = 'MRHead', sampleDataLogic.downloadMRHead
-    volumeToRender = slicer.util.getNode(name)
+    if not hasattr(self, 'transformAmplitude'):
+      self.transformAmplitude = 0
+    if not hasattr(self, 'transformFrequency'):
+      self.transformFrequency = 1
+
+    if transformAmplitude != None:
+      self.transformAmplitude = transformAmplitude
+    if transformFrequency != None:
+      self.transformFrequency = transformFrequency
+
+    if not volumeToRender and hasattr(self, 'volumeToRender'):
+      volumeToRender = self.volumeToRender
+
     if not volumeToRender:
-      print("Getting Volume")
-      volumeToRender = method()
+      import SampleData
+      sampleDataLogic = SampleData.SampleDataLogic()
+      name, method = 'MRHead', sampleDataLogic.downloadMRHead
+      name, method = 'CTACardio', sampleDataLogic.downloadCTACardio
+      volumeToRender = slicer.util.getNode(name)
+      if not volumeToRender:
+        print("Getting Volume")
+        volumeToRender = method()
+    self.volumeToRender = volumeToRender
 
     if False:
       if not hasattr(self,"ellipsoid"):
@@ -554,6 +562,20 @@ class ShaderComputationTest(ScriptedLoadableModuleTest):
           return smallest_tMax > largest_tMin;
       }
     """
+    transformPointSource = """
+      vec3 transformPoint(const in vec3 samplePoint)
+      // Apply a spatial transformation to a world space point
+      {
+          // TODO: get MRMLTransformNodes as vector fields
+          float frequency = %(frequency)f;
+          return samplePoint + %(amplitude)f * vec3(samplePoint.x * sin(frequency * samplePoint.z),
+                                                    samplePoint.y * cos(frequency * samplePoint.z),
+                                                    0);
+      }
+    """ % {
+        'amplitude' : self.transformAmplitude,
+        'frequency' : self.transformFrequency
+    }
 
     sampleVolumeParameters = self.sampleVolumeParameters(volumeToRender)
     sampleVolumeParameters.update({
@@ -610,6 +632,9 @@ class ShaderComputationTest(ScriptedLoadableModuleTest):
       }
     """ % sampleVolumeParameters
 
+    # create a volume property node in the scene if needed.  This is used
+    # for the color transfer function and can be manipulated in the
+    # Slicer Volume Rendering module widget
     volumePropertyNode = slicer.util.getNode('ShaderVolumeProperty')
     if not volumePropertyNode:
       volumePropertyNode = slicer.vtkMRMLVolumePropertyNode()
@@ -678,6 +703,8 @@ class ShaderComputationTest(ScriptedLoadableModuleTest):
 
           vec3 samplePoint = eyeRayOrigin + eyeRayDirection * tCurrent;
 
+          samplePoint = transformPoint(samplePoint);
+
           vec3 normal;
           float gradientMagnitude;
           sampleVolume(volumeSampler, samplePoint, gradientSize, sample, normal, gradientMagnitude);
@@ -689,6 +716,9 @@ class ShaderComputationTest(ScriptedLoadableModuleTest):
           // Phong lighting
           // http://en.wikipedia.org/wiki/Phong_reflection_model
           //vec3 Cdiffuse = vec3(1.,1.,0.);
+          if (samplePoint.x > 0.) {
+            color = vec3(1,1,0);
+          }
           vec3 Cambient = color;
           vec3 Cdiffuse = color;
           vec3 Cspecular = vec3(1.,1.,1.);
@@ -733,6 +763,7 @@ class ShaderComputationTest(ScriptedLoadableModuleTest):
     self.shaderComputation.SetFragmentShaderSource("""
       %(header)s
       %(intersectBox)s
+      %(transformPoint)s
       %(sampleVolume)s
       %(transferFunction)s
       %(rayCast)s
@@ -746,6 +777,7 @@ class ShaderComputationTest(ScriptedLoadableModuleTest):
     """ % {
       'header' : headerSource,
       'intersectBox' : intersectBoxSource,
+      'transformPoint' : transformPointSource,
       'sampleVolume' : sampleVolumeSource,
       'transferFunction' : transferFunctionSource,
       'rayCast' : rayCastSource,

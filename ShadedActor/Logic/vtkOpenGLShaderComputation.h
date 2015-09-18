@@ -50,16 +50,22 @@ public:
 
   // Description:
   // Manage the OpenGL offscreen rendering framebuffer for computing
-  bool AcquireFramebuffer();
-  void ReleaseFramebuffer();
+  // Select this mode to render into a buffer that matches the ResultImageData
+  // and can be read back with ReadResult.  Otherwise use
+  // vtkOpenGLTextureImage::AttachAsDrawTarget to set a texture
+  // as the draw target.
+  bool AcquireResultRenderbuffer();
+  void ReleaseResultRenderbuffer();
 
   // Description:
   // Perform the actual computation
-  // Updates the texture and program if needed and then
-  // renders a quadrilateral of to a renderbuffer the size
-  // of the ResultImageData and uses the program
-  // to perform the shading.
+  // Updates the program if needed and then
+  // renders to the current framebuffer configuration
   void Compute();
+
+  // Description:
+  // Copy the framebuffer pixels into the result image
+  void ReadResult();
 
   // Description:
   // The strings defining the shaders

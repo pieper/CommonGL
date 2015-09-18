@@ -48,6 +48,13 @@ vtkOpenGLShaderComputation::vtkOpenGLShaderComputation()
 //----------------------------------------------------------------------------
 vtkOpenGLShaderComputation::~vtkOpenGLShaderComputation()
 {
+  //Bind 0, which means render to back buffer, as a result, this->FramebufferID is unbound
+  vtkgl::BindFramebuffer(vtkgl::FRAMEBUFFER, 0);
+  if (this->FramebufferID != 0)
+    {
+    vtkgl::DeleteFramebuffers(1, &(this->FramebufferID));
+    }
+  this->ReleaseResultRenderbuffer();
   this->SetVertexShaderSource(NULL);
   this->SetFragmentShaderSource(NULL);
   this->SetResultImageData(NULL);
@@ -209,12 +216,17 @@ void vtkOpenGLShaderComputation::Initialize(vtkRenderWindow *renderWindow)
   extensions->LoadExtension("GL_ARB_framebuffer_object");
   vtkOpenGLCheckErrorMacro("after extension load");
 
+  // generate and bind our Framebuffer
+  vtkgl::GenFramebuffers(1, &(this->FramebufferID));
+  vtkgl::BindFramebuffer(vtkgl::FRAMEBUFFER, this->FramebufferID);
+  vtkOpenGLCheckErrorMacro("after binding framebuffer");
+
   this->Initialized = true;
 }
 
 
 //-----------------------------------------------------------------------------
-bool vtkOpenGLShaderComputation::AcquireFramebuffer()
+bool vtkOpenGLShaderComputation::AcquireResultRenderbuffer()
 {
   //
   // adapted from
@@ -225,12 +237,6 @@ bool vtkOpenGLShaderComputation::AcquireFramebuffer()
   this->ResultImageData->GetDimensions(resultDimensions);
 
   vtkOpenGLClearErrorMacro();
-
-  //
-  // generate and bind our Framebuffer
-  vtkgl::GenFramebuffers(1, &(this->FramebufferID));
-  vtkgl::BindFramebuffer(vtkgl::FRAMEBUFFER, this->FramebufferID);
-  vtkOpenGLCheckErrorMacro("after binding framebuffer");
 
   //
   // Create and attach a color buffer
@@ -309,15 +315,18 @@ bool vtkOpenGLShaderComputation::AcquireFramebuffer()
 }
 
 //----------------------------------------------------------------------------
-void vtkOpenGLShaderComputation::ReleaseFramebuffer()
+void vtkOpenGLShaderComputation::ReleaseResultRenderbuffer()
 {
   vtkOpenGLClearErrorMacro();
   //Delete temp resources
-  vtkgl::DeleteRenderbuffers(1, &(this->ColorRenderbufferID));
-  vtkgl::DeleteRenderbuffers(1, &(this->DepthRenderbufferID));
-  //Bind 0, which means render to back buffer, as a result, this->FramebufferID is unbound
-  vtkgl::BindFramebuffer(vtkgl::FRAMEBUFFER, 0);
-  vtkgl::DeleteFramebuffers(1, &(this->FramebufferID));
+  if (this->ColorRenderbufferID != 0)
+    {
+    vtkgl::DeleteRenderbuffers(1, &(this->ColorRenderbufferID));
+    }
+  if (this->DepthRenderbufferID != 0)
+    {
+    vtkgl::DeleteRenderbuffers(1, &(this->DepthRenderbufferID));
+    }
   vtkOpenGLCheckErrorMacro("after framebuffer release");
 }
 
@@ -326,7 +335,6 @@ void vtkOpenGLShaderComputation::ReleaseFramebuffer()
 //
 void vtkOpenGLShaderComputation::Compute()
 {
-
   // bail out early if we aren't configured corretly
   if (this->VertexShaderSource == NULL || this->FragmentShaderSource == NULL)
     {
@@ -334,31 +342,21 @@ void vtkOpenGLShaderComputation::Compute()
     return;
     }
 
-  // check and set up the result area
-  if (this->ResultImageData == NULL
-      ||
-      this->ResultImageData->GetPointData() == NULL
-      ||
-      this->ResultImageData->GetPointData()->GetScalars() == NULL
-      ||
-      this->ResultImageData->GetPointData()->GetScalars()->GetVoidPointer(0) == NULL)
-    {
-    vtkErrorMacro("Result image data is not correctly set up.");
-    return;
-    }
-  int resultDimensions[3];
-  this->ResultImageData->GetDimensions(resultDimensions);
-  vtkPointData *pointData = this->ResultImageData->GetPointData();
-  vtkDataArray *scalars = pointData->GetScalars();
-  void *resultPixels = scalars->GetVoidPointer(0);
-
   // ensure that all our OpenGL calls go to the correct context
   this->RenderWindow->MakeCurrent();
 
-  if (!this->AcquireFramebuffer()) // TODO: should re-use the framebuffer for efficiency
+  //
+  // Does the GPU support current Framebuffer configuration?
+  //
+  GLenum status;
+  status = vtkgl::CheckFramebufferStatus(vtkgl::FRAMEBUFFER);
+  switch(status)
     {
-    vtkErrorMacro("Could not set up a framebuffer.");
-    return;
+    case vtkgl::FRAMEBUFFER_COMPLETE:
+      break;
+    default:
+      vtkErrorMacro("Can't compute in incompete framebuffer; status is: " << status);
+      return;
     }
 
   // Configure the program and the input data
@@ -441,17 +439,40 @@ void vtkOpenGLShaderComputation::Compute()
   vtkOpenGLCheckErrorMacro("after drawing");
 
   //
+  // Don't use the program or the framebuffer anymore
+  //
+  glUseProgram ( 0 );
+}
+
+//----------------------------------------------------------------------------
+void vtkOpenGLShaderComputation::ReadResult()
+{
+  vtkOpenGLClearErrorMacro();
+  // check and set up the result area
+  if (this->ResultImageData == NULL
+      ||
+      this->ResultImageData->GetPointData() == NULL
+      ||
+      this->ResultImageData->GetPointData()->GetScalars() == NULL
+      ||
+      this->ResultImageData->GetPointData()->GetScalars()->GetVoidPointer(0) == NULL)
+    {
+    vtkErrorMacro("Result image data is not correctly set up.");
+    return;
+    }
+  int resultDimensions[3];
+  this->ResultImageData->GetDimensions(resultDimensions);
+  vtkPointData *pointData = this->ResultImageData->GetPointData();
+  vtkDataArray *scalars = pointData->GetScalars();
+  void *resultPixels = scalars->GetVoidPointer(0);
+
+  //
   // Collect the results of the calculation back into the image data
   //
   glReadPixels(0, 0, resultDimensions[0], resultDimensions[1], GL_RGBA, GL_UNSIGNED_BYTE, resultPixels);
   pointData->Modified();
 
-  vtkOpenGLCheckErrorMacro("after computing and reading back");
-  //
-  // Don't use the program or the framebuffer anymore
-  //
-  glUseProgram ( 0 );
-  this->ReleaseFramebuffer();
+  vtkOpenGLCheckErrorMacro("after reading back");
 }
 
 //----------------------------------------------------------------------------

@@ -724,16 +724,10 @@ class ShaderComputationTest(ScriptedLoadableModuleTest):
     resultImage.AllocateScalars(vtk.VTK_UNSIGNED_CHAR, 4)
     self.shaderComputation.SetResultImageData(resultImage)
 
+    self.shaderComputation.AcquireResultRenderbuffer()
     self.shaderComputation.Compute()
-
-    # TODO:
-    """
-    - refactor test to support re-use of self.shaderComputation
-    - fix vtkOpenGLShaderComputation to set MTime of resultImage (point data and image data)
-    - test render performance
-    - debug raycaster
-    - add features!
-    """
+    self.shaderComputation.ReadResult()
+    self.shaderComputation.ReleaseResultRenderbuffer()
 
     if not hasattr(self, "iv"):
       self.iv = vtk.vtkImageViewer()

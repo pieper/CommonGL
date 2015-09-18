@@ -151,6 +151,7 @@ bool vtkOpenGLTextureImage::UpdateTexture()
   return true;
 }
 
+//----------------------------------------------------------------------------
 void vtkOpenGLTextureImage::Activate(vtkTypeUInt32 unit)
 {
 
@@ -186,6 +187,62 @@ void vtkOpenGLTextureImage::Activate(vtkTypeUInt32 unit)
   glBindTexture(GL_TEXTURE_3D, this->TextureName);
 
   vtkOpenGLCheckErrorMacro("after activating");
+}
+
+//----------------------------------------------------------------------------
+void vtkOpenGLTextureImage::AttachAsDrawTarget(int attachmentIndex, int layer, int attachment)
+{
+  vtkOpenGLCheckErrorMacro("before attaching");
+
+  if (!this->ShaderComputation || !this->ShaderComputation->GetInitialized())
+    {
+    vtkErrorMacro("No initialized ShaderComputation instance is set.");
+    return;
+    }
+  this->ShaderComputation->GetRenderWindow()->MakeCurrent();
+
+  // attachment is 0 (color), 1 (depth), 2 (stencil), 3 (depth-stencil)
+  if (attachmentIndex != 0 || attachment != 0)
+    {
+    vtkErrorMacro("Only GL_COLOR_ATTACHMENT0 supported for now.");
+    return;
+    }
+
+  if (this->TextureName == 0)
+    {
+    if (!this->UpdateTexture())
+      {
+      vtkErrorMacro("Could not update texture.");
+      return;
+      }
+    }
+
+  vtkOpenGLClearErrorMacro();
+
+  vtkgl::FramebufferTexture3D(
+    /* target */      vtkgl::FRAMEBUFFER,
+    /* attachment */  vtkgl::COLOR_ATTACHMENT0,
+    /* textarget */   GL_TEXTURE_3D,
+    /* texture */     this->TextureName,
+    /* level */       0,
+    /* layer */       layer);
+
+  vtkOpenGLCheckErrorMacro("after attaching");
+
+  //
+  // Does the GPU support current Framebuffer configuration?
+  //
+  GLenum status;
+  status = vtkgl::CheckFramebufferStatus(vtkgl::FRAMEBUFFER);
+  switch(status)
+    {
+    case vtkgl::FRAMEBUFFER_COMPLETE:
+      break;
+    default:
+      vtkOpenGLCheckErrorMacro("after bad framebuffer status");
+      vtkErrorMacro("Bad framebuffer configuration, status is: " << status);
+      return;
+    }
 }
 
 //----------------------------------------------------------------------------

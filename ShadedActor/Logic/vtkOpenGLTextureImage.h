@@ -75,19 +75,23 @@ public:
   void Activate(vtkTypeUInt32 unit);
 
   // Description:
-  // Make the specified level (slice) be the draw target.
+  // Make the specified layer (slice) be the draw target.
   // This is used to direct the output of the shading into
   // the specified slice of the texture and can be used to 
   // implemement volumetric algorithms.  Iterated algorithms
   // can be done fully on the GPU by swapping textures between
   // active units and draw targets.
-  //void DrawTarget(int level);
+  // Parameters:
+  // attachmentIndex is which color attachment to use (only valid for color)
+  // level is z slice to target
+  // attachment is 0 (color), 1 (depth), 2 (stencil), 3 (depth-stencil)
+  void AttachAsDrawTarget(int attachmentIndex, int layer, int attachement);
 
   // Description:
   // TODO
   // Read the texture data back into the image data
   // (assumes it has been written as a target)
-  //void Read();
+  //void Get();
 
   // Description:
   // TODO: options for min and mag filter, wrapping...

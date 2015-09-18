@@ -148,6 +148,15 @@ class IsobrushEffectTool(LabelEffect.LabelEffectTool):
     #
     from vtkSlicerShadedActorModuleLogicPython import vtkOpenGLShaderComputation
     self.shaderComputation=vtkOpenGLShaderComputation()
+    from vtkSlicerShadedActorModuleLogicPython import vtkOpenGLTextureImage
+    self.backgroundTextureImage=vtkOpenGLTextureImage()
+    self.labelTextureImage=vtkOpenGLTextureImage()
+    self.resultImageTexture=vtkOpenGLTextureImage()
+    self.iterationImageTexture=vtkOpenGLTextureImage()
+    self.backgroundTextureImage.SetShaderComputation(self.shaderComputation)
+    self.labelTextureImage.SetShaderComputation(self.shaderComputation)
+    self.resultImageTexture.SetShaderComputation(self.shaderComputation)
+    self.iterationImageTexture.SetShaderComputation(self.shaderComputation)
 
     self.shaderComputation.SetVertexShaderSource("""
       #version 120
@@ -222,41 +231,112 @@ class IsobrushEffectTool(LabelEffect.LabelEffectTool):
     backgroundLogic.GetReslice().Update()
     backgroundImage = backgroundLogic.GetReslice().GetOutputDataObject(0)
     backgroundDimensions = backgroundImage.GetDimensions()
-    self.shaderComputation.SetTextureImageData(backgroundImage)
+    self.backgroundTextureImage.SetImageData(backgroundImage)
+    self.backgroundTextureImage.Activate(0)
+    labelLogic = sliceLogic.GetLabelLayer()
+    labelLogic.GetReslice().Update()
+    labelImage = labelLogic.GetReslice().GetOutputDataObject(0)
+    labelDimensions = labelImage.GetDimensions()
+    self.labelTextureImage.SetImageData(labelImage)
+    self.labelTextureImage.Activate(1)
 
     # make a result image to match dimensions and type
     resultImage = vtk.vtkImageData()
     resultImage.SetDimensions(backgroundDimensions)
     resultImage.AllocateScalars(vtk.VTK_UNSIGNED_CHAR, 4)
     self.shaderComputation.SetResultImageData(resultImage)
+    self.shaderComputation.AcquireResultRenderbuffer()
+    self.resultImageTexture.SetImageData(resultImage)
+    self.resultImageTexture.Activate(2)
 
-    referenceX = xy[0] / float(backgroundDimensions[0])
-    referenceY = xy[1] / float(backgroundDimensions[1])
-    self.shaderComputation.SetFragmentShaderSource("""
+    # make another  result image for iteration
+    iterationImage = vtk.vtkImageData()
+    iterationImage.SetDimensions(backgroundDimensions)
+    iterationImage.AllocateScalars(vtk.VTK_UNSIGNED_CHAR, 4)
+    self.iterationImageTexture.SetImageData(iterationImage)
+    self.iterationImageTexture.Activate(3)
+
+    fragmentShaderSource = """
       #version 120
       varying vec3 interpolatedTextureCoordinate;
-      uniform sampler3D volumeSampler;
+      uniform sampler3D textureUnit0; // background
+      uniform sampler3D textureUnit1; // label
+      uniform sampler3D %(iterationTextureUnit)s; // where to get previous iteration image
       void main()
       {
         vec3 referenceTextureCoordinate = vec3(%(referenceX)f, %(referenceY)f, .5);
         vec3 samplePoint = interpolatedTextureCoordinate;
-        vec4 referenceSample = 500. * texture3D(volumeSampler, referenceTextureCoordinate);
-        vec4 volumeSample = 500. * texture3D(volumeSampler, interpolatedTextureCoordinate);
+        // background samples
+        vec4 referenceSample = %(sampleScale)f * texture3D(textureUnit0, referenceTextureCoordinate);
+        vec4 volumeSample = %(sampleScale)f * texture3D(textureUnit0, interpolatedTextureCoordinate);
+        // previous result sample
+        vec4 previousSample = %(sampleScale)f * texture3D(%(iterationTextureUnit)s, interpolatedTextureCoordinate);
+
         gl_FragColor = vec4(0.);
-        if (distance(referenceTextureCoordinate, interpolatedTextureCoordinate) < %(radius)f) {
-          if ((referenceSample.r - volumeSample.r) > 0.) {
-            gl_FragColor = vec4(1., 1., 0., .5);
+
+        float brushDistance = distance(vec2(0.,0.), vec2( %(radiusX)f, %(radiusY)f));
+        float pixelDistance = distance(referenceTextureCoordinate, interpolatedTextureCoordinate);
+
+        // if the current pixel is in the reference point, always paint it
+        if (pixelDistance < brushDistance) {
+          gl_FragColor = vec4(1., 1., 0., .5);
+        }
+
+        // if the current pixel is in the overall radius
+        // and the intensity matches
+        // and a neighbor is non-zero then set it
+        if (pixelDistance < %(radius)f) {
+          if (abs(referenceSample.r - volumeSample.r) < %(similarityThreshold)f) {
+            vec3 neighbor;
+            neighbor = interpolatedTextureCoordinate + vec3(-brushDistance, 0., 0.);
+            if (texture3D(%(iterationTextureUnit)s, neighbor).r > 0.) {
+              gl_FragColor = vec4(1., 1., 0., .5);
+            }
+            neighbor = interpolatedTextureCoordinate + vec3( brushDistance, 0., 0.);
+            if (texture3D(%(iterationTextureUnit)s, neighbor).r > 0.) {
+              gl_FragColor = vec4(1., 1., 0., .5);
+            }
+            neighbor = interpolatedTextureCoordinate + vec3( 0, -brushDistance, 0.);
+            if (texture3D(%(iterationTextureUnit)s, neighbor).r > 0.) {
+              gl_FragColor = vec4(1., 1., 0., .5);
+            }
+            neighbor = interpolatedTextureCoordinate + vec3( 0,  brushDistance, 0.);
+            if (texture3D(%(iterationTextureUnit)s, neighbor).r > 0.) {
+              gl_FragColor = vec4(1., 1., 0., .5);
+            }
           }
         }
       }
     """ % {
-        'referenceX' : referenceX,
-        'referenceY' : referenceY,
-        'radius'     : 0.1,
-        }
-    )
+      'sampleScale' : 500.,
+      'similarityThreshold' : 0.1,
+      'referenceX' : xy[0] / float(backgroundDimensions[0]),
+      'referenceY' : xy[1] / float(backgroundDimensions[1]),
+      'radiusX' : 1. / backgroundDimensions[0],
+      'radiusY' : 1. / backgroundDimensions[1],
+      'radius'     : 0.5,
+      'iterationTextureUnit'     : "%(iterationTextureUnit)s",
+    }
 
+    for iteration in range(99):
+      if iteration % 2:
+        self.iterationImageTexture.AttachAsDrawTarget(0, 0, 0)
+        iterationTextureUnit = "textureUnit2"
+      else:
+        self.resultImageTexture.AttachAsDrawTarget(0, 0, 0)
+        iterationTextureUnit = "textureUnit3"
+      self.shaderComputation.SetFragmentShaderSource(fragmentShaderSource % {
+        'iterationTextureUnit' : iterationTextureUnit
+      })
+      self.shaderComputation.Compute()
+
+    self.shaderComputation.AcquireResultRenderbuffer()
+    self.shaderComputation.SetFragmentShaderSource(fragmentShaderSource % {
+      'iterationTextureUnit' : "textureUnit3"
+    })
     self.shaderComputation.Compute()
+    self.shaderComputation.ReadResult()
+    self.shaderComputation.ReleaseResultRenderbuffer()
 
     self.cursorMapper.SetInputDataObject(resultImage)
     self.cursorActor.VisibilityOn()

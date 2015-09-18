@@ -36,12 +36,9 @@ vtkOpenGLShaderComputation::vtkOpenGLShaderComputation()
   this->Initialized = false;
   this->VertexShaderSource = NULL;
   this->FragmentShaderSource = NULL;
-  this->TextureImageData = NULL;
   this->ResultImageData = NULL;
   this->ProgramObject = 0;
   this->ProgramObjectMTime = 0;
-  this->TextureID = 0;
-  this->TextureMTime = 0;
 
   this->RenderWindow = vtkRenderWindow::New();
   this->RenderWindow->SetOffScreenRendering(1);
@@ -53,51 +50,13 @@ vtkOpenGLShaderComputation::~vtkOpenGLShaderComputation()
 {
   this->SetVertexShaderSource(NULL);
   this->SetFragmentShaderSource(NULL);
-  this->SetTextureImageData(NULL);
   this->SetResultImageData(NULL);
   if (this->ProgramObject > 0)
     {
     glDeleteProgram ( this->ProgramObject );
     this->ProgramObject = 0;
     }
-  if (this->TextureID > 0)
-    {
-    glDeleteTextures(1, &(this->TextureID));
-    this->TextureID = 0;
-    }
   this->SetRenderWindow(NULL);
-}
-
-//----------------------------------------------------------------------------
-// adapted from Rendering/OpenGL2/vtkTextureObject.cxx
-static GLenum vtkScalarTypeToGLType(int vtk_scalar_type)
-{
-  // DON'T DEAL with VTK_CHAR as this is platform dependent.
-  switch (vtk_scalar_type)
-    {
-  case VTK_SIGNED_CHAR:
-    return GL_BYTE;
-
-  case VTK_UNSIGNED_CHAR:
-    return GL_UNSIGNED_BYTE;
-
-  case VTK_SHORT:
-    return GL_SHORT;
-
-  case VTK_UNSIGNED_SHORT:
-    return GL_UNSIGNED_SHORT;
-
-  case VTK_INT:
-    return GL_INT;
-
-  case VTK_UNSIGNED_INT:
-    return GL_UNSIGNED_INT;
-
-  case VTK_FLOAT:
-  case VTK_VOID: // used for depth component textures.
-    return GL_FLOAT;
-    }
-  return 0;
 }
 
 //----------------------------------------------------------------------------
@@ -229,67 +188,6 @@ bool vtkOpenGLShaderComputation::UpdateProgram()
   return true;
 }
 
-//----------------------------------------------------------------------------
-// Reload the texture if needed
-//
-bool vtkOpenGLShaderComputation::UpdateTexture()
-{
-  vtkOpenGLClearErrorMacro();
-  if (this->TextureImageData->GetMTime() > this->TextureMTime)
-    {
-    if (this->TextureID != 0)
-      {
-      glDeleteTextures (1, &(this->TextureID) );
-      }
-    this->TextureMTime = 0;
-    }
-  else
-    {
-    return true;
-    }
-
-  if ( this->TextureImageData == 0 )
-    {
-    return false;
-    }
-  if ( this->TextureImageData->GetNumberOfScalarComponents() != 1 )
-    {
-    vtkErrorMacro("Must have 1 component image data for texture");
-    return false;
-    }
-
-  int dimensions[3];
-  this->TextureImageData->GetDimensions(dimensions);
-  vtkPointData *pointData = this->TextureImageData->GetPointData();
-  vtkDataArray *scalars = pointData->GetScalars();
-  void *pixels = scalars->GetVoidPointer(0);
-
-  glEnable(GL_TEXTURE_3D);
-  glGenTextures(1, &(this->TextureID));
-  glBindTexture(GL_TEXTURE_3D, this->TextureID);
-  glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-  glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-  glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE);
-  glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-  glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-
-  glTexImage3D(/* target */            GL_TEXTURE_3D,
-               /* level */             0,
-               /* internal format */   1,
-               /* width */             dimensions[0],
-               /* height */            dimensions[1],
-               /* depth */             dimensions[2],
-               /* border */            0,
-               /* format */            GL_LUMINANCE,
-               /* type */              vtkScalarTypeToGLType(this->TextureImageData->GetScalarType()),
-               /* pixels */            pixels
-  );
-
-  this->TextureMTime = this->TextureImageData->GetMTime();
-  vtkOpenGLCheckErrorMacro("after texture update");
-  return true;
-}
-
 //-----------------------------------------------------------------------------
 void vtkOpenGLShaderComputation::Initialize(vtkRenderWindow *renderWindow)
 {
@@ -332,6 +230,7 @@ bool vtkOpenGLShaderComputation::AcquireFramebuffer()
   // generate and bind our Framebuffer
   vtkgl::GenFramebuffers(1, &(this->FramebufferID));
   vtkgl::BindFramebuffer(vtkgl::FRAMEBUFFER, this->FramebufferID);
+  vtkOpenGLCheckErrorMacro("after binding framebuffer");
 
   //
   // Create and attach a color buffer
@@ -342,11 +241,12 @@ bool vtkOpenGLShaderComputation::AcquireFramebuffer()
   vtkgl::GenRenderbuffers(1, &(this->ColorRenderbufferID));
   vtkgl::BindRenderbuffer(vtkgl::RENDERBUFFER, this->ColorRenderbufferID);
   vtkgl::RenderbufferStorage(vtkgl::RENDERBUFFER, GL_RGBA8,
-                           resultDimensions[0], resultDimensions[1]);
+                             resultDimensions[0], resultDimensions[1]);
   vtkgl::FramebufferRenderbuffer(vtkgl::FRAMEBUFFER,
-                               vtkgl::COLOR_ATTACHMENT0,
-                               vtkgl::RENDERBUFFER,
-                               this->ColorRenderbufferID);
+                                 vtkgl::COLOR_ATTACHMENT0,
+                                 vtkgl::RENDERBUFFER,
+                                 this->ColorRenderbufferID);
+  vtkOpenGLCheckErrorMacro("after binding color renderbuffer");
 
   //
   // Now do the same for the depth buffer
@@ -354,11 +254,12 @@ bool vtkOpenGLShaderComputation::AcquireFramebuffer()
   vtkgl::GenRenderbuffers(1, &(this->DepthRenderbufferID));
   vtkgl::BindRenderbuffer(vtkgl::RENDERBUFFER, this->DepthRenderbufferID);
   vtkgl::RenderbufferStorage(vtkgl::RENDERBUFFER, GL_DEPTH_COMPONENT24,
-                           resultDimensions[0], resultDimensions[1]);
+                             resultDimensions[0], resultDimensions[1]);
   vtkgl::FramebufferRenderbuffer(vtkgl::FRAMEBUFFER,
-                               vtkgl::DEPTH_ATTACHMENT,
-                               vtkgl::RENDERBUFFER,
-                               this->DepthRenderbufferID);
+                                 vtkgl::DEPTH_ATTACHMENT,
+                                 vtkgl::RENDERBUFFER,
+                                 this->DepthRenderbufferID);
+  vtkOpenGLCheckErrorMacro("after binding depth renderbuffer");
 
   //
   // Does the GPU support current Framebuffer configuration?
@@ -381,19 +282,27 @@ bool vtkOpenGLShaderComputation::AcquireFramebuffer()
   vtkgl::BindFramebuffer(vtkgl::FRAMEBUFFER, this->FramebufferID);
   glClearColor(0.0, 0.0, 0.0, 0.0);
   glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+  vtkOpenGLCheckErrorMacro("after clearing renderbuffers");
 
   //
   // Set up a normalized rendering environment
   //
   glViewport(0, 0, resultDimensions[0], resultDimensions[1]);
+  vtkOpenGLCheckErrorMacro("after 1 normalizing environment");
   glMatrixMode(GL_PROJECTION);
+  vtkOpenGLCheckErrorMacro("after 2 normalizing environment");
   glLoadIdentity();
+  vtkOpenGLCheckErrorMacro("after 3 normalizing environment");
   glOrtho(0.0, resultDimensions[0], 0.0, resultDimensions[1], -1.0, 1.0);
+  vtkOpenGLCheckErrorMacro("after 4 normalizing environment");
   glMatrixMode(GL_MODELVIEW);
+  vtkOpenGLCheckErrorMacro("after 5 normalizing environment");
   glLoadIdentity();
-  glDisable(GL_TEXTURE_2D);
+  vtkOpenGLCheckErrorMacro("after 6 normalizing environment");
   glDisable(GL_BLEND);
+  vtkOpenGLCheckErrorMacro("after 8 normalizing environment");
   glEnable(GL_DEPTH_TEST);
+  vtkOpenGLCheckErrorMacro("after 9 normalizing environment");
 
   vtkOpenGLCheckErrorMacro("after framebuffer acquisition");
   return true;
@@ -458,11 +367,6 @@ void vtkOpenGLShaderComputation::Compute()
     vtkErrorMacro("Could not update shader program.");
     return;
     }
-  if (!this->UpdateTexture())
-    {
-    vtkErrorMacro("Could not update texture.");
-    return;
-    }
 
   // define a normalized computing surface
   GLfloat planeVertices[] = { -1.0f, -1.0f, 0.0f,
@@ -481,6 +385,7 @@ void vtkOpenGLShaderComputation::Compute()
   vtkOpenGLClearErrorMacro();
   // Use the program object
   glUseProgram ( this->ProgramObject );
+  vtkOpenGLCheckErrorMacro("after use program");
 
   // put vertices in a buffer and make it available to the program
   GLuint vertexLocation = glGetAttribLocation(this->ProgramObject, "vertexAttribute");
@@ -490,6 +395,7 @@ void vtkOpenGLShaderComputation::Compute()
   glBufferData(GL_ARRAY_BUFFER, planeVerticesSize, planeVertices, GL_STATIC_DRAW);
   glEnableVertexAttribArray ( vertexLocation );
   glVertexAttribPointer ( vertexLocation, 3, GL_FLOAT, GL_FALSE, 0, 0 );
+  vtkOpenGLCheckErrorMacro("after vertices");
 
   // texture coordinates in a buffer
   GLuint textureCoordinatesLocation = glGetAttribLocation(this->ProgramObject,
@@ -500,18 +406,39 @@ void vtkOpenGLShaderComputation::Compute()
   glBufferData(GL_ARRAY_BUFFER, planeTextureCoordinatesSize, planeTextureCoordinates, GL_STATIC_DRAW);
   glEnableVertexAttribArray ( textureCoordinatesLocation );
   glVertexAttribPointer ( textureCoordinatesLocation, 2, GL_FLOAT, GL_FALSE, 0, 0 );
+  vtkOpenGLCheckErrorMacro("after texture coordinates");
 
-  // make sure the texture is bound and pass in the address of it (use Texture unit 0)
-  glEnable(GL_TEXTURE_3D);
-  glActiveTexture(GL_TEXTURE0);
-  glBindTexture(GL_TEXTURE_3D, this->TextureID);
-  GLuint volumeSamplerLocation = glGetUniformLocation(this->ProgramObject, "volumeSampler");
-  glUniform1i(volumeSamplerLocation, 0);
+  // Iterate through all standard texture units and if one of them
+  // is used as a uniform variable in the program, set the corresponding value.
+  // This relies on vtkOpenGLTextureImage (or something else) to have
+  // set up the texture units with data.
+  // Up to 48 units are meant to be supported on any OpenGL implementation
+  // but the defined enums appear to only go to 32.
+  #define __TEXTURE_UNIT_COUNT 16 // TODO: maybe expose parameter of how many textures to look for
+  char textureUnitUniformString[14]; // 14 length of "textureUnit__" including \0
+  strncpy(textureUnitUniformString, "textureUnit__", 14);
+  char textureUnitLength = 11; // Up to the two underscores that will be replaced
+  char asciiUnit[3]; // target for snprintf
+  int unitIndex; 
+  for (unitIndex = 0; unitIndex < __TEXTURE_UNIT_COUNT; unitIndex++)
+    {
+    snprintf(asciiUnit, 3, "%d", unitIndex);
+    strncpy(textureUnitUniformString + textureUnitLength, asciiUnit, 2);
+    GLint textureUnitSamplerLocation = glGetUniformLocation(this->ProgramObject, textureUnitUniformString);
+    if ( textureUnitSamplerLocation >= 0 ) 
+      {
+      glUniform1i(textureUnitSamplerLocation, unitIndex);
+      vtkOpenGLCheckErrorMacro("after setting texture unit uniform " << unitIndex);
+      }
+    }
+  vtkOpenGLCheckErrorMacro("after setting texture unit uniforms");
 
   //
   // GO!
   //
   glDrawArrays ( GL_QUADS, 0, 4 );
+
+  vtkOpenGLCheckErrorMacro("after drawing");
 
   //
   // Collect the results of the calculation back into the image data
@@ -548,14 +475,6 @@ void vtkOpenGLShaderComputation::PrintSelf(ostream& os, vtkIndent indent)
     {
     os << indent << "FragmentShaderSource: (none)\n";
     }
-  if ( this->TextureImageData )
-    {
-    os << indent << "TextureImageData: " << this->TextureImageData << "\n";
-    }
-  else
-    {
-    os << indent << "TextureImageData: (none)\n";
-    }
   if ( this->ResultImageData )
     {
     os << indent << "ResultImageData: " << this->ResultImageData << "\n";
@@ -566,8 +485,6 @@ void vtkOpenGLShaderComputation::PrintSelf(ostream& os, vtkIndent indent)
     }
   os << indent << "ProgramObject: " << this->ProgramObject << "\n";
   os << indent << "ProgramObjectMTime: " << this->ProgramObjectMTime << "\n";
-  os << indent << "TextureID: " << this->TextureID << "\n";
-  os << indent << "TextureMTime: " << this->TextureMTime << "\n";
   os << indent << "FramebufferID: " << this->FramebufferID << "\n";
   os << indent << "ColorRenderbufferID: " << this->ColorRenderbufferID << "\n";
   os << indent << "DepthRenderbufferID: " << this->DepthRenderbufferID << "\n";

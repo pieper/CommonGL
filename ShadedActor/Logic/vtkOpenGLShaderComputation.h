@@ -49,10 +49,6 @@ public:
   bool UpdateProgram();
 
   // Description:
-  // Reload the texture if needed
-  bool UpdateTexture();
-
-  // Description:
   // Manage the OpenGL offscreen rendering framebuffer for computing
   bool AcquireFramebuffer();
   void ReleaseFramebuffer();
@@ -73,11 +69,6 @@ public:
   vtkSetStringMacro(FragmentShaderSource);
 
   // Description:
-  // The 3D texture to use as input.
-  vtkGetObjectMacro(TextureImageData, vtkImageData);
-  vtkSetObjectMacro(TextureImageData, vtkImageData);
-
-  // Description:
   // The results of the computation.
   // Must be set with the desired dimensions before calling Compute.
   vtkGetObjectMacro(ResultImageData, vtkImageData);
@@ -87,6 +78,10 @@ public:
   // Used internally to manage OpenGL context and extensions
   vtkGetObjectMacro(RenderWindow, vtkRenderWindow);
   vtkSetObjectMacro(RenderWindow, vtkRenderWindow);
+
+  // Description:
+  // Has the context been set up with a render window?
+  vtkGetMacro(Initialized, bool);
 
 protected:
   vtkOpenGLShaderComputation();
@@ -99,13 +94,10 @@ private:
   bool Initialized;
   char *VertexShaderSource;
   char *FragmentShaderSource;
-  vtkImageData *TextureImageData;
   vtkImageData *ResultImageData;
 
   vtkTypeUInt32 ProgramObject; // vtkTypeUInt32 same as GLuint: https://www.opengl.org/wiki/OpenGL_Type
   unsigned long ProgramObjectMTime;
-  vtkTypeUInt32 TextureID;
-  unsigned long TextureMTime;
   vtkTypeUInt32 FramebufferID;
   vtkTypeUInt32 ColorRenderbufferID;
   vtkTypeUInt32 DepthRenderbufferID;

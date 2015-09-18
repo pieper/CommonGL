@@ -71,9 +71,9 @@ class ShaderComputationWidget(ScriptedLoadableModuleWidget):
     # amplitude value
     #
     self.transformAmplitude = ctk.ctkSliderWidget()
-    self.transformAmplitude.singleStep = 0.01
-    self.transformAmplitude.minimum = -10
-    self.transformAmplitude.maximum = 10
+    self.transformAmplitude.singleStep = 0.001
+    self.transformAmplitude.minimum = -2
+    self.transformAmplitude.maximum = 2
     self.transformAmplitude.value = 0.
     self.transformAmplitude.setToolTip("Amount of the transform to apply")
     parametersFormLayout.addRow("Transform Amplitude", self.transformAmplitude)
@@ -82,10 +82,10 @@ class ShaderComputationWidget(ScriptedLoadableModuleWidget):
     # frequency value
     #
     self.transformFrequency = ctk.ctkSliderWidget()
-    self.transformFrequency.singleStep = 0.001
-    self.transformFrequency.minimum = -1
-    self.transformFrequency.maximum = 1
-    self.transformFrequency.value = 0.
+    self.transformFrequency.singleStep = 0.0001
+    self.transformFrequency.minimum = -.5
+    self.transformFrequency.maximum = .5
+    self.transformFrequency.value = 0.1
     self.transformFrequency.setToolTip("Frequency the transform")
     parametersFormLayout.addRow("Transform Frequency", self.transformFrequency)
 
@@ -93,7 +93,7 @@ class ShaderComputationWidget(ScriptedLoadableModuleWidget):
     # check box to apply transform
     #
     self.applyTransformCheckBox = qt.QCheckBox()
-    self.applyTransformCheckBox.checked = 0
+    self.applyTransformCheckBox.checked = True
     self.applyTransformCheckBox.setToolTip("If checked, render with transform applied.")
     parametersFormLayout.addRow("Apply Transform", self.applyTransformCheckBox)
 
@@ -119,7 +119,7 @@ class ShaderComputationWidget(ScriptedLoadableModuleWidget):
     if self.applyTransformCheckBox.checked:
       amplitude = self.transformAmplitude.value
       frequency = self.transformFrequency.value
-    self.computationTester.test_ShaderComputation2( volumeToRender=self.renderSelector.currentNode(),
+    self.computationTester.test_ShaderComputation( volumeToRender=self.renderSelector.currentNode(),
                                                transformAmplitude=amplitude,
                                                transformFrequency=frequency)
 
@@ -160,85 +160,7 @@ class ShaderComputationTest(ScriptedLoadableModuleTest):
     """Run as few or as many tests as needed here.
     """
     self.setUp()
-    #self.test_ShaderComputation1()
-    self.test_ShaderComputation2()
-
-  def test_ShaderComputation1(self):
-    """ Ideally you should have several levels of tests.  At the lowest level
-    tests should exercise the functionality of the logic with different inputs
-    (both valid and invalid).  At higher levels your tests should emulate the
-    way the user would interact with your code and confirm that it still works
-    the way you intended.
-    One of the most important features of the tests is that it should alert other
-    developers when their changes will have an impact on the behavior of your
-    module.  For example, if a developer removes a feature that you depend on,
-    your test should break so they know that the feature is needed.
-    """
-
-    # self.delayDisplay("Starting the test", 100)
-
-    mrHeadVolume = slicer.util.getNode('MRHead')
-    if not mrHeadVolume:
-      import SampleData
-      sampleDataLogic = SampleData.SampleDataLogic()
-      print("Getting MR Head Volume")
-      mrHeadVolume = sampleDataLogic.downloadMRHead()
-
-    resize = vtk.vtkImageResize()
-    resize.SetInputDataObject(mrHeadVolume.GetImageData())
-    resize.SetOutputDimensions(256,256,128)
-    resize.Update()
-
-    from vtkSlicerShadedActorModuleLogicPython import vtkOpenGLShaderComputation
-
-    shaderComputation=vtkOpenGLShaderComputation()
-
-    shaderComputation.SetVertexShaderSource("""
-      #version 120
-      attribute vec3 vertexAttribute;
-      attribute vec2 textureCoordinateAttribute;
-      varying vec4 interpolatedColor;
-      varying vec3 interpolatedTextureCoordinate;
-      void main()
-      {
-        interpolatedColor = vec4(0.5) + vec4(vertexAttribute, 1.);
-        interpolatedTextureCoordinate = vec3(textureCoordinateAttribute, .5);
-        gl_Position = vec4(vertexAttribute, 1.);
-      }
-    """)
-
-    shaderComputation.SetFragmentShaderSource("""
-      #version 120
-      varying vec4 interpolatedColor;
-      varying vec3 interpolatedTextureCoordinate;
-      uniform sampler3D volumeSampler;
-      void main()
-      {
-        vec4 integratedRay = vec4(0.);
-        for (int i = 0; i < 256; i++) {
-          vec3 samplePoint = vec3(interpolatedTextureCoordinate.st, i/256.);
-          vec4 volumeSample = texture3D(volumeSampler, samplePoint);
-          integratedRay += volumeSample;
-        }
-        gl_FragColor = integratedRay;
-      }
-    """)
-    shaderComputation.SetTextureImageData(resize.GetOutputDataObject(0))
-
-    resultImage = vtk.vtkImageData()
-    resultImage.SetDimensions(512, 512, 1)
-    resultImage.AllocateScalars(vtk.VTK_UNSIGNED_CHAR, 4)
-    shaderComputation.SetResultImageData(resultImage)
-
-    shaderComputation.Compute()
-
-    iv = vtk.vtkImageViewer()
-    iv.SetColorLevel(128)
-    iv.SetColorWindow(256)
-    iv.SetInputData(resultImage)
-    iv.Render()
-
-    slicer.modules.ShaderComputationWidget.iv = iv
+    self.test_ShaderComputation()
 
   def sampleVolumeParameters(self,volumeNode):
     """Calculate the dictionary of substitutions for the
@@ -445,7 +367,7 @@ class ShaderComputationTest(ScriptedLoadableModuleTest):
     return source
 
 
-  def test_ShaderComputation2(self, caller=None, event=None, volumeToRender=None, transformAmplitude=None, transformFrequency=None):
+  def test_ShaderComputation(self, caller=None, event=None, volumeToRender=None, transformAmplitude=None, transformFrequency=None):
     """ Ideally you should have several levels of tests.  At the lowest level
     tests should exercise the functionality of the logic with different inputs
     (both valid and invalid).  At higher levels your tests should emulate the
@@ -507,14 +429,17 @@ class ShaderComputationTest(ScriptedLoadableModuleTest):
     sampleUnshift = low
     sampleUnscale = high-low
 
-    if not hasattr(self,"shaderComputation") and hasattr(slicer.modules.ShaderComputationInstance, "test"):
-      oldSelf = slicer.modules.ShaderComputationInstance.test
+    if not hasattr(self,"shaderComputation") and hasattr(slicer.modules.ShaderComputationInstance, "testInstance"):
+      oldSelf = slicer.modules.ShaderComputationInstance.testInstance
       oldSelf.renderWindow.RemoveObserver(oldSelf.renderTag)
 
     if not hasattr(self,"shaderComputation"):
       print('new shaderComputation')
       from vtkSlicerShadedActorModuleLogicPython import vtkOpenGLShaderComputation
       self.shaderComputation=vtkOpenGLShaderComputation()
+      from vtkSlicerShadedActorModuleLogicPython import vtkOpenGLTextureImage
+      self.textureImage=vtkOpenGLTextureImage()
+      self.textureImage.SetShaderComputation(self.shaderComputation)
 
     # TODO: these strings can move to a CommonGL spot once debugged
     headerSource = """
@@ -583,11 +508,11 @@ class ShaderComputationTest(ScriptedLoadableModuleTest):
           'sampleUnscale' : sampleUnscale,
     })
     sampleVolumeSource = """
-      float textureSampleDenormalized(const in sampler3D volumeSampler, const in vec3 stpPoint) {
-        return ( texture3D(volumeSampler, stpPoint).r * %(sampleUnscale)f + %(sampleUnshift)f );
+      float textureSampleDenormalized(const in sampler3D volumeTextureUnit, const in vec3 stpPoint) {
+        return ( texture3D(volumeTextureUnit, stpPoint).r * %(sampleUnscale)f + %(sampleUnshift)f );
       }
 
-      void sampleVolume(const in sampler3D volumeSampler, const in vec3 samplePoint, const in float gradientSize,
+      void sampleVolume(const in sampler3D volumeTextureUnit, const in vec3 samplePoint, const in float gradientSize,
                         out float sample, out vec3 normal, out float gradientMagnitude)
       {
         // vectors to map RAS to stp
@@ -601,7 +526,7 @@ class ShaderComputationTest(ScriptedLoadableModuleTest):
         stpPoint.t = dot(rasToT,sampleCoordinate);
         stpPoint.p = dot(rasToP,sampleCoordinate);
 
-        #define S(point) textureSampleDenormalized(volumeSampler, point)
+        #define S(point) textureSampleDenormalized(volumeTextureUnit, point)
 
         // read from 3D texture
         sample = S(stpPoint);
@@ -662,7 +587,7 @@ class ShaderComputationTest(ScriptedLoadableModuleTest):
       // volume ray caster - starts from the front and collects color and opacity
       // contributions until fully saturated.
       // Sample coordinate is 0->1 texture space
-      vec4 rayCast( in vec3 sampleCoordinate, in sampler3D volumeSampler )
+      vec4 rayCast( in vec3 sampleCoordinate, in sampler3D volumeTextureUnit )
       {
         vec4 backgroundRGBA = vec4(0.,0.,.5,1.); // TODO: mid blue background for now
 
@@ -703,11 +628,12 @@ class ShaderComputationTest(ScriptedLoadableModuleTest):
 
           vec3 samplePoint = eyeRayOrigin + eyeRayDirection * tCurrent;
 
+          // TODO: transform should be applied to the normal too
           samplePoint = transformPoint(samplePoint);
 
           vec3 normal;
           float gradientMagnitude;
-          sampleVolume(volumeSampler, samplePoint, gradientSize, sample, normal, gradientMagnitude);
+          sampleVolume(volumeTextureUnit, samplePoint, gradientSize, sample, normal, gradientMagnitude);
           vec3 color;
           float opacity;
           transferFunction(sample, gradientMagnitude, color, opacity);
@@ -769,10 +695,10 @@ class ShaderComputationTest(ScriptedLoadableModuleTest):
       %(rayCast)s
 
       varying vec3 interpolatedTextureCoordinate;
-      uniform sampler3D volumeSampler;
+      uniform sampler3D textureUnit15;
       void main()
       {
-        gl_FragColor = rayCast(interpolatedTextureCoordinate, volumeSampler);
+        gl_FragColor = rayCast(interpolatedTextureCoordinate, textureUnit15);
       }
     """ % {
       'header' : headerSource,
@@ -790,7 +716,8 @@ class ShaderComputationTest(ScriptedLoadableModuleTest):
       fp.close()
 
     self.shiftScale.Update()
-    self.shaderComputation.SetTextureImageData(self.shiftScale.GetOutputDataObject(0))
+    self.textureImage.SetImageData(self.shiftScale.GetOutputDataObject(0))
+    self.textureImage.Activate(15);
 
     resultImage = vtk.vtkImageData()
     resultImage.SetDimensions(1024, 1024, 1)
@@ -821,5 +748,5 @@ class ShaderComputationTest(ScriptedLoadableModuleTest):
       threeDView = threeDWidget.threeDView()
       self.renderWindow = threeDView.renderWindow()
       print('adding render observer')
-      self.renderTag = self.renderWindow.AddObserver(vtk.vtkCommand.EndEvent, self.test_ShaderComputation2)
-    slicer.modules.ShaderComputationInstance.test = self
+      self.renderTag = self.renderWindow.AddObserver(vtk.vtkCommand.EndEvent, self.test_ShaderComputation)
+    slicer.modules.ShaderComputationInstance.testInstance = self

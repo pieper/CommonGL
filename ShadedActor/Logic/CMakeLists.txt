@@ -14,6 +14,8 @@ set(${KIT}_SRCS
   vtkOpenGLShadedActor.h
   vtkOpenGLShaderComputation.cxx
   vtkOpenGLShaderComputation.h
+  vtkOpenGLTextureImage.cxx
+  vtkOpenGLTextureImage.h
   )
 
 set(${KIT}_TARGET_LIBRARIES

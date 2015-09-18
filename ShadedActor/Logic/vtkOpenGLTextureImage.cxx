@@ -102,9 +102,19 @@ bool vtkOpenGLTextureImage::UpdateTexture()
     {
     return false;
     }
-  if ( this->ImageData->GetNumberOfScalarComponents() != 1 )
+  int componentCount = this->ImageData->GetNumberOfScalarComponents();
+  GLenum format;
+  if ( componentCount == 1 )
     {
-    vtkErrorMacro("Must have 1 component image data for texture");
+    format = GL_LUMINANCE;
+    }
+  else if ( componentCount == 4 )
+    {
+    format = GL_RGBA;
+    }
+  else
+    {
+    vtkErrorMacro("Must have 1 or 4 component image data for texture");
     return false;
     }
 
@@ -126,12 +136,12 @@ bool vtkOpenGLTextureImage::UpdateTexture()
 
   glTexImage3D(/* target */            GL_TEXTURE_3D,
                /* level */             0,
-               /* internal format */   1,
+               /* internal format */   componentCount,
                /* width */             dimensions[0],
                /* height */            dimensions[1],
                /* depth */             dimensions[2],
                /* border */            0,
-               /* format */            GL_LUMINANCE,
+               /* format */            format,
                /* type */              vtkScalarTypeToGLType(this->ImageData->GetScalarType()),
                /* pixels */            pixels
   );

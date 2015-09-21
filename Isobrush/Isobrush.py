@@ -318,12 +318,12 @@ class IsobrushEffectTool(LabelEffect.LabelEffectTool):
       'iterationTextureUnit'     : "%(iterationTextureUnit)s",
     }
 
-    for iteration in range(99):
+    for iteration in range(9):
       if iteration % 2:
-        self.iterationImageTexture.AttachAsDrawTarget(0, 0, 0)
+        self.iterationImageTexture.AttachAsDrawTarget()
         iterationTextureUnit = "textureUnit2"
       else:
-        self.resultImageTexture.AttachAsDrawTarget(0, 0, 0)
+        self.resultImageTexture.AttachAsDrawTarget()
         iterationTextureUnit = "textureUnit3"
       self.shaderComputation.SetFragmentShaderSource(fragmentShaderSource % {
         'iterationTextureUnit' : iterationTextureUnit
@@ -359,7 +359,6 @@ class IsobrushEffectTool(LabelEffect.LabelEffectTool):
   def applyIsocurve(self):
     print('apply')
     # TODO: should be normal apply operation using ras points
-
 
 #
 # IsobrushEffectLogic

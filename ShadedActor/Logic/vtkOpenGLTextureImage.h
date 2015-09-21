@@ -85,7 +85,14 @@ public:
   // attachmentIndex is which color attachment to use (only valid for color)
   // level is z slice to target
   // attachment is 0 (color), 1 (depth), 2 (stencil), 3 (depth-stencil)
-  void AttachAsDrawTarget(int attachmentIndex, int layer, int attachement);
+  enum AttachmentPoints
+    {
+    ColorAttachmentPoint = 0,
+    DepthAttachmentPoint,
+    StencilAttachmentPoint,
+    DepthStencilAttachmentPoint
+    };
+  void AttachAsDrawTarget(int layer=0, int attachement=0, int attachmentIndex=0);
 
   // Description:
   // TODO

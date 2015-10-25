@@ -435,10 +435,15 @@ class ShaderComputationTest(ScriptedLoadableModuleTest):
 
     if not hasattr(self,"shaderComputation"):
       print('new shaderComputation')
-      from vtkSlicerShadedActorModuleLogicPython import vtkOpenGLShaderComputation
-      self.shaderComputation=vtkOpenGLShaderComputation()
-      from vtkSlicerShadedActorModuleLogicPython import vtkOpenGLTextureImage
-      self.textureImage=vtkOpenGLTextureImage()
+      try:
+        from vtkSlicerShadedActorModuleLogicPython import vtkOpenGLShaderComputation
+        self.shaderComputation=vtkOpenGLShaderComputation()
+        from vtkSlicerShadedActorModuleLogicPython import vtkOpenGLTextureImage
+        self.textureImage=vtkOpenGLTextureImage()
+      except ImportError:
+        import vtkAddon
+        self.shaderComputation=vtkAddon.vtkOpenGLShaderComputation()
+        self.textureImage=vtkAddon.vtkOpenGLTextureImage()
       self.textureImage.SetShaderComputation(self.shaderComputation)
 
     # TODO: these strings can move to a CommonGL spot once debugged
@@ -720,7 +725,7 @@ class ShaderComputationTest(ScriptedLoadableModuleTest):
     self.textureImage.Activate(15);
 
     resultImage = vtk.vtkImageData()
-    resultImage.SetDimensions(1024, 1024, 1)
+    resultImage.SetDimensions(512, 512, 1)
     resultImage.AllocateScalars(vtk.VTK_UNSIGNED_CHAR, 4)
     self.shaderComputation.SetResultImageData(resultImage)
 

@@ -610,7 +610,7 @@ class ShaderComputationTest(ScriptedLoadableModuleTest):
                                       + ( %(halfSinViewAngle)s * normalizedCoordinate.y * vec3( %(viewUp)s    ) ) );
 
 
-        vec3 pointLight = vec3(20000., 2500., 1000.); // TODO
+        vec3 pointLight = vec3(200., 2500., 1000.); // TODO
 
         // find intersection with box, possibly terminate early
         float tNear, tFar;
@@ -650,12 +650,15 @@ class ShaderComputationTest(ScriptedLoadableModuleTest):
           if (samplePoint.x > 0.) {
             color = vec3(1,1,0);
           }
+          if (samplePoint.z > 0.) {
+            color += vec3(0,0,1);
+          }
           vec3 Cambient = color;
           vec3 Cdiffuse = color;
           vec3 Cspecular = vec3(1.,1.,1.);
-          float Kambient = .20;
-          float Kdiffuse = .65;
-          float Kspecular = .70;
+          float Kambient = .30;
+          float Kdiffuse = .95;
+          float Kspecular = .90;
           float Shininess = 15.;
 
           vec3 phongColor = Kambient * Cambient;

@@ -437,13 +437,13 @@ class ShaderComputationTest(ScriptedLoadableModuleTest):
       print('new shaderComputation')
       try:
         from vtkSlicerShadedActorModuleLogicPython import vtkOpenGLShaderComputation
-        self.shaderComputation=vtkOpenGLShaderComputation()
         from vtkSlicerShadedActorModuleLogicPython import vtkOpenGLTextureImage
-        self.textureImage=vtkOpenGLTextureImage()
       except ImportError:
         import vtkAddon
-        self.shaderComputation=vtkAddon.vtkOpenGLShaderComputation()
-        self.textureImage=vtkAddon.vtkOpenGLTextureImage()
+        vtkOpenGLShaderComputation=vtkAddon.vtkOpenGLShaderComputation
+        vtkOpenGLTextureImage=vtkAddon.vtkOpenGLTextureImage
+      self.shaderComputation=vtkOpenGLShaderComputation()
+      self.textureImage=vtkOpenGLTextureImage()
       self.textureImage.SetShaderComputation(self.shaderComputation)
 
     # TODO: these strings can move to a CommonGL spot once debugged

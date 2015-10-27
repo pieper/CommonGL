@@ -146,9 +146,14 @@ class IsobrushEffectTool(LabelEffect.LabelEffectTool):
     #   at startup time
     # - uses dummy render window for framebuffer object context
     #
-    from vtkSlicerShadedActorModuleLogicPython import vtkOpenGLShaderComputation
+    try:
+      from vtkSlicerShadedActorModuleLogicPython import vtkOpenGLShaderComputation
+      from vtkSlicerShadedActorModuleLogicPython import vtkOpenGLTextureImage
+    except ImportError:
+      import vtkAddon
+      vtkOpenGLShaderComputation=vtkAddon.vtkOpenGLShaderComputation
+      vtkOpenGLTextureImage=vtkAddon.vtkOpenGLTextureImage
     self.shaderComputation=vtkOpenGLShaderComputation()
-    from vtkSlicerShadedActorModuleLogicPython import vtkOpenGLTextureImage
     self.backgroundTextureImage=vtkOpenGLTextureImage()
     self.labelTextureImage=vtkOpenGLTextureImage()
     self.resultImageTexture=vtkOpenGLTextureImage()
@@ -318,7 +323,7 @@ class IsobrushEffectTool(LabelEffect.LabelEffectTool):
       'iterationTextureUnit'     : "%(iterationTextureUnit)s",
     }
 
-    for iteration in range(9):
+    for iteration in range(29):
       if iteration % 2:
         self.iterationImageTexture.AttachAsDrawTarget()
         iterationTextureUnit = "textureUnit2"

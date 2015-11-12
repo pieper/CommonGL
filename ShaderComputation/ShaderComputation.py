@@ -124,6 +124,51 @@ class ShaderComputationWidget(ScriptedLoadableModuleWidget):
                                                transformFrequency=frequency)
 
 
+from slicer.util import VTKObservationMixin
+class SceneObserver(VTKObservationMixin):
+  """Observes everything in the scene
+  """
+
+  def __init__(self):
+    """Add observers to the mrmlScene and also to all the nodes of the scene"""
+    VTKObservationMixin.__init__(self)
+    print('scene observer created')
+
+    scene = slicer.mrmlScene
+    self.addObserver(scene, scene.NodeAddedEvent, self.onNodeAdded)
+    self.addObserver(scene, scene.NodeRemovedEvent, self.onNodeRemoved)
+
+    scene.InitTraversal()
+    node = scene.GetNextNode()
+    while node:
+      self.observeNode(node)
+      node = scene.GetNextNode()
+
+  def __del__(self):
+    print('scene observer deleted')
+    self.removeObservers()
+
+  def observeNode(self,node):
+    if node.IsA('vtkMRMLNode'):
+      # use AnyEvent since it will catch events like TransformModified
+      self.addObserver(node, vtk.vtkCommand.AnyEvent, self.onNodeModified)
+    else:
+      raise('should not happen: non node is in scene')
+
+  @vtk.calldata_type(vtk.VTK_OBJECT)
+  def onNodeAdded(self, caller, event, calldata):
+    node = calldata
+    if not self.hasObserver(node, vtk.vtkCommand.AnyEvent, self.onNodeModified):
+      self.observeNode(node)
+
+  @vtk.calldata_type(vtk.VTK_OBJECT)
+  def onNodeRemoved(self, caller, event, calldata):
+    node = calldata
+    self.removeObserver(node, vtk.vtkCommand.AnyEvent, self.onNodeModified)
+
+  def onNodeModified(self,node,eventName):
+    if not node.IsA('vtkMRMLCrosshairNode'):
+      print(node.GetID(), "Modified")
 
 #
 # ShaderComputationLogic
@@ -378,6 +423,11 @@ class ShaderComputationTest(ScriptedLoadableModuleTest):
     module.  For example, if a developer removes a feature that you depend on,
     your test should break so they know that the feature is needed.
     """
+
+    if hasattr(self, 'sceneObserver'):
+      self.sceneObserver.__del__()
+
+    self.sceneObserver = SceneObserver()
 
     if not hasattr(self, 'transformAmplitude'):
       self.transformAmplitude = 0

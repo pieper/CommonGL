@@ -62,7 +62,7 @@ class ShaderComputationWidget(ScriptedLoadableModuleWidget):
     self.renderSelector.removeEnabled = False
     self.renderSelector.noneEnabled = False
     self.renderSelector.showHidden = False
-    self.renderSelector.showChildNodeTypes = False
+    self.renderSelector.showChildNodeTypes = True
     self.renderSelector.setMRMLScene( slicer.mrmlScene )
     self.renderSelector.setToolTip( "Pick volume to render." )
     parametersFormLayout.addRow("Render Volume: ", self.renderSelector)
@@ -90,6 +90,17 @@ class ShaderComputationWidget(ScriptedLoadableModuleWidget):
     parametersFormLayout.addRow("Transform Frequency", self.transformFrequency)
 
     #
+    # phase value
+    #
+    self.transformPhase = ctk.ctkSliderWidget()
+    self.transformPhase.singleStep = 0.0001
+    self.transformPhase.minimum = -.5
+    self.transformPhase.maximum = .5
+    self.transformPhase.value = 0.1
+    self.transformPhase.setToolTip("Phase the transform")
+    parametersFormLayout.addRow("Transform Phase", self.transformPhase)
+
+    #
     # check box to apply transform
     #
     self.applyTransformCheckBox = qt.QCheckBox()
@@ -101,6 +112,7 @@ class ShaderComputationWidget(ScriptedLoadableModuleWidget):
     self.renderSelector.connect("currentNodeChanged(vtkMRMLNode*)", self.onChange)
     self.transformAmplitude.connect("valueChanged(double)", self.onChange)
     self.transformFrequency.connect("valueChanged(double)", self.onChange)
+    self.transformPhase.connect("valueChanged(double)", self.onChange)
     self.applyTransformCheckBox.connect("toggled(bool)", self.onChange)
 
     # Add vertical spacer
@@ -116,17 +128,24 @@ class ShaderComputationWidget(ScriptedLoadableModuleWidget):
     volume = self.renderSelector.currentNode()
     amplitude = 0.
     frequency = 0.
+    phase = 0.
     if self.applyTransformCheckBox.checked:
       amplitude = self.transformAmplitude.value
       frequency = self.transformFrequency.value
+      phase = self.transformPhase.value
     self.computationTester.test_ShaderComputation( volumeToRender=self.renderSelector.currentNode(),
                                                transformAmplitude=amplitude,
-                                               transformFrequency=frequency)
+                                               transformFrequency=frequency,
+                                               transformPhase=phase)
+
 
 
 from slicer.util import VTKObservationMixin
 class SceneObserver(VTKObservationMixin):
   """Observes everything in the scene
+  TODO: add a simple way for users of this class to subscribe
+  to patterns of events, such as adds/removals of certain classes
+  of nodes, or events from any node of a given node class.
   """
 
   def __init__(self):
@@ -411,8 +430,7 @@ class ShaderComputationTest(ScriptedLoadableModuleTest):
     """
     return source
 
-
-  def test_ShaderComputation(self, caller=None, event=None, volumeToRender=None, transformAmplitude=None, transformFrequency=None):
+  def test_ShaderComputation(self, caller=None, event=None, volumeToRender=None, transformAmplitude=None, transformFrequency=None, transformPhase=None):
     """ Ideally you should have several levels of tests.  At the lowest level
     tests should exercise the functionality of the logic with different inputs
     (both valid and invalid).  At higher levels your tests should emulate the
@@ -424,20 +442,22 @@ class ShaderComputationTest(ScriptedLoadableModuleTest):
     your test should break so they know that the feature is needed.
     """
 
-    if hasattr(self, 'sceneObserver'):
-      self.sceneObserver.__del__()
-
-    self.sceneObserver = SceneObserver()
+    if not hasattr(self, 'sceneObserver'):
+      self.sceneObserver = SceneObserver()
 
     if not hasattr(self, 'transformAmplitude'):
       self.transformAmplitude = 0
     if not hasattr(self, 'transformFrequency'):
       self.transformFrequency = 1
+    if not hasattr(self, 'transformPhase'):
+      self.transformPhase = 0
 
     if transformAmplitude != None:
       self.transformAmplitude = transformAmplitude
     if transformFrequency != None:
       self.transformFrequency = transformFrequency
+    if transformPhase != None:
+      self.transformPhase = transformPhase
 
     if not volumeToRender and hasattr(self, 'volumeToRender'):
       volumeToRender = self.volumeToRender
@@ -456,13 +476,16 @@ class ShaderComputationTest(ScriptedLoadableModuleTest):
     if False:
       if not hasattr(self,"ellipsoid"):
         self.ellipsoid = vtk.vtkImageEllipsoidSource()
-      self.ellipsoid.SetInValue(200)
-      self.ellipsoid.SetOutValue(0)
-      self.ellipsoid.SetOutputScalarTypeToShort()
-      self.ellipsoid.SetCenter(270,270,170)
-      self.ellipsoid.SetWholeExtent(volumeToRender.GetImageData().GetExtent())
-      self.ellipsoid.Update()
-      volumeToRender.SetAndObserveImageData(self.ellipsoid.GetOutputDataObject(0))
+        self.ellipsoid.SetInValue(200)
+        self.ellipsoid.SetOutValue(0)
+        self.ellipsoid.SetOutputScalarTypeToShort()
+        self.ellipsoid.SetCenter(270,270,170)
+        self.ellipsoid.SetWholeExtent(volumeToRender.GetImageData().GetExtent())
+        self.smooth = vtk.vtkImageGaussianSmooth()
+        self.smooth.SetInputConnection(self.ellipsoid.GetOutputPort())
+        self.smooth.SetRadiusFactors(5,5,5)
+        self.smooth.Update()
+      volumeToRender.SetAndObserveImageData(self.smooth.GetOutputDataObject(0))
 
     # since the OpenGL texture will be floats in the range 0 to 1, all negative values
     # will get clamped to zero.  Also if the sample values aren't evenly spread through
@@ -548,13 +571,15 @@ class ShaderComputationTest(ScriptedLoadableModuleTest):
       {
           // TODO: get MRMLTransformNodes as vector fields
           float frequency = %(frequency)f;
-          return samplePoint + %(amplitude)f * vec3(samplePoint.x * sin(frequency * samplePoint.z),
-                                                    samplePoint.y * cos(frequency * samplePoint.z),
+          float phase = %(phase)f;
+          return samplePoint + %(amplitude)f * vec3(samplePoint.x * sin(phase + frequency * samplePoint.z),
+                                                    samplePoint.y * cos(phase + frequency * samplePoint.z),
                                                     0);
       }
     """ % {
         'amplitude' : self.transformAmplitude,
-        'frequency' : self.transformFrequency
+        'frequency' : self.transformFrequency,
+        'phase' : self.transformPhase
     }
 
     sampleVolumeParameters = self.sampleVolumeParameters(volumeToRender)

@@ -133,11 +133,10 @@ class ShaderComputationWidget(ScriptedLoadableModuleWidget):
       amplitude = self.transformAmplitude.value
       frequency = self.transformFrequency.value
       phase = self.transformPhase.value
-    self.computationTester.test_ShaderComputation( volumeToRender=self.renderSelector.currentNode(),
-                                               transformAmplitude=amplitude,
-                                               transformFrequency=frequency,
-                                               transformPhase=phase)
-
+    self.computationTester.amplitude = amplitude
+    self.computationTester.frequency = frequency
+    self.computationTester.phase = phase
+    self.computationTester.test_ShaderComputation(volumeToRender=volume)
 
 
 from slicer.util import VTKObservationMixin
@@ -189,44 +188,42 @@ class SceneObserver(VTKObservationMixin):
     if not node.IsA('vtkMRMLCrosshairNode'):
       print(node.GetID(), "Modified")
 
-#
-# ShaderComputationLogic
-#
 
-class ShaderComputationLogic(ScriptedLoadableModuleLogic):
-  """This class should implement all the actual
-  computation done by your module.  The interface
-  should be such that other python code can import
-  this class and make use of the functionality without
-  requiring an instance of the Widget.
-  Uses ScriptedLoadableModuleLogic base class, available at:
-  https://github.com/Slicer/Slicer/blob/master/Base/Python/slicer/ScriptedLoadableModule.py
-  """
+class VolumeTexture(VTKObservationMixin):
+  """Maps a volume node to a GLSL renderable collection
+  of textures and code"""
 
-  def __init__(self):
-    ScriptedLoadableModuleLogic.__init__(self)
+  def __init__(self, shaderComputation, textureUnit, volumeNode):
+    self.volumeNode = volumeNode
 
+    # since the OpenGL texture will be floats in the range 0 to 1, all negative values
+    # will get clamped to zero.  Also if the sample values aren't evenly spread through
+    # the zero to one space we may run into numerical issues.  So rescale the data to the
+    # to fit in the full range of the a 16 bit short.
+    # (any vtkImageData scalar type should work with this approach)
+    self.shiftScale = vtk.vtkImageShiftScale()
+    self.shiftScale.SetInputData(self.volumeNode.GetImageData())
+    self.shiftScale.SetOutputScalarTypeToUnsignedShort()
+    low, high = volumeToRender.GetImageData().GetScalarRange()
+    self.shiftScale.SetShift(-low)
+    scale = (1. * vtk.VTK_UNSIGNED_SHORT_MAX) / (high-low)
+    self.shiftScale.SetScale(scale)
+    self.sampleUnshift = low
+    self.sampleUnscale = high-low
 
-class ShaderComputationTest(ScriptedLoadableModuleTest):
-  """
-  This is the test case for your scripted module.
-  Uses ScriptedLoadableModuleTest base class, available at:
-  https://github.com/Slicer/Slicer/blob/master/Base/Python/slicer/ScriptedLoadableModule.py
-  """
+    try:
+      from vtkSlicerShadedActorModuleLogicPython import vtkOpenGLTextureImage
+    except ImportError:
+      import vtkAddon
+      vtkOpenGLTextureImage=vtkAddon.vtkOpenGLTextureImage
+    self.textureImage=vtkOpenGLTextureImage()
+    self.textureImage.SetShaderComputation(shaderComputation)
 
-  def setUp(self):
-    """ Do whatever is needed to reset the state - typically a scene clear will be enough.
-    """
-    # slicer.mrmlScene.Clear(0)
-    pass
+    self.shiftScale.Update()
+    self.textureImage.SetImageData(self.shiftScale.GetOutputDataObject(0))
+    self.textureImage.Activate(15);
 
-  def runTest(self):
-    """Run as few or as many tests as needed here.
-    """
-    self.setUp()
-    self.test_ShaderComputation()
-
-  def sampleVolumeParameters(self,volumeNode):
+  def sampleVolumeParameters(self):
     """Calculate the dictionary of substitutions for the
     current state of the volume node in a form for
     substitution into the sampleVolume shader function
@@ -234,12 +231,12 @@ class ShaderComputationTest(ScriptedLoadableModuleTest):
     requires doing a lot of parsing and data management in C++
     """
 
-    volumeArray = slicer.util.array(volumeNode.GetID())
+    volumeArray = slicer.util.array(self.volumeNode.GetID())
 
     rasToIJK = vtk.vtkMatrix4x4()
-    volumeNode.GetRASToIJKMatrix(rasToIJK)
+    self.volumeNode.GetRASToIJKMatrix(rasToIJK)
 
-    transformNode = volumeNode.GetParentTransformNode()
+    transformNode = self.volumeNode.GetParentTransformNode()
     if transformNode:
       if transformNode.IsTransformToWorldLinear():
         rasToRAS = vtk.vtkMatrix4x4()
@@ -251,7 +248,7 @@ class ShaderComputationTest(ScriptedLoadableModuleTest):
 
     # dimensions are number of pixels in (row, column, slice)
     # which maps to 0-1 space of S, T, P
-    dimensions = volumeNode.GetImageData().GetDimensions()
+    dimensions = self.volumeNode.GetImageData().GetDimensions()
     ijkToSTP = vtk.vtkMatrix4x4()
     ijkToSTP.Identity()
     for diagonal in range(3):
@@ -272,7 +269,7 @@ class ShaderComputationTest(ScriptedLoadableModuleTest):
     # since texture is 0-1, take into account both pixel spacing
     # and dimension as layed out in memory so that the normals
     # is calculated in a uniform space
-    spacings = volumeNode.GetSpacing()
+    spacings = self.volumeNode.GetSpacing()
     parameters['mmToS'] = spacings[0] / dimensions[0]
     parameters['mmToT'] = spacings[1] / dimensions[1]
     parameters['mmToP'] = spacings[2] / dimensions[2]
@@ -293,59 +290,86 @@ class ShaderComputationTest(ScriptedLoadableModuleTest):
 
     return parameters
 
-  def rayCastVolumeParameters(self,volumeNode):
-    """Calculate the dictionary of substitutions for the
-    current state of the volume node and camera in a form for
-    substitution into the rayCast shader function
-    TODO: this would probably be better as uniforms, but that
-    requires doing a lot of parsing and data management in C++
-    """
+  def sampleVolumeSource(self):
+    """Return the GLSL code to sample our volume in space"""
 
-    parameters = {}
+    sampleVolumeParameters = self.sampleVolumeParameters(volumeToRender)
+    sampleVolumeParameters.update({
+          'sampleUnshift' : self.sampleUnshift,
+          'sampleUnscale' : self.sampleUnscale,
+    })
+    sampleVolumeSource = """
+      float textureSampleDenormalized(const in sampler3D volumeTextureUnit, const in vec3 stpPoint) {
+        return ( texture3D(volumeTextureUnit, stpPoint).r * %(sampleUnscale)f + %(sampleUnshift)f );
+      }
 
-    rasBounds = [0,]*6
-    volumeNode.GetRASBounds(rasBounds)
-    rasBoxMin = (rasBounds[0], rasBounds[2], rasBounds[4])
-    rasBoxMax = (rasBounds[1], rasBounds[3], rasBounds[5])
-    parameters['rasBoxMin'] = "%f, %f, %f" % rasBoxMin
-    parameters['rasBoxMax'] = "%f, %f, %f" % rasBoxMax
+      void sampleVolume(const in sampler3D volumeTextureUnit, const in vec3 samplePoint, const in float gradientSize,
+                        out float sample, out vec3 normal, out float gradientMagnitude)
+      {
+        // vectors to map RAS to stp
+        vec4 rasToS =  vec4( %(rasToS)s );
+        vec4 rasToT =  vec4( %(rasToT)s );
+        vec4 rasToP =  vec4( %(rasToP)s );
 
-    # conservative guesses:
-    # sampleStep is in mm, shortest side in world space divided by max volume dimension
-    # gradientSize is in [0,1] texture space, sampleStep divided by max volume dimensions
+        vec3 stpPoint;
+        vec4 sampleCoordinate = vec4(samplePoint, 1.);
+        stpPoint.s = dot(rasToS,sampleCoordinate);
+        stpPoint.t = dot(rasToT,sampleCoordinate);
+        stpPoint.p = dot(rasToP,sampleCoordinate);
 
-    rasMinSide = min(rasBoxMax[0] - rasBoxMin[0], rasBoxMax[1] - rasBoxMin[1], rasBoxMax[2] - rasBoxMin[2])
-    maxDimension = max(volumeNode.GetImageData().GetDimensions())
-    parameters['sampleStep'] = 1. * rasMinSide / maxDimension
-    minSpacing = min(volumeNode.GetSpacing())
-    parameters['gradientSize'] = .5 * minSpacing
+        #define S(point) textureSampleDenormalized(volumeTextureUnit, point)
 
-    # get the camera parameters from default 3D window
-    layoutManager = slicer.app.layoutManager()
-    threeDWidget = layoutManager.threeDWidget(0)
-    threeDView = threeDWidget.threeDView()
-    renderWindow = threeDView.renderWindow()
-    renderers = renderWindow.GetRenderers()
-    renderer = renderers.GetItemAsObject(0)
-    camera = renderer.GetActiveCamera()
+        // read from 3D texture
+        sample = S(stpPoint);
 
-    import math
-    import numpy
-    viewPosition = numpy.array(camera.GetPosition())
-    focalPoint = numpy.array(camera.GetFocalPoint())
-    viewDistance = numpy.linalg.norm(focalPoint - viewPosition)
-    viewNormal = (focalPoint - viewPosition) / viewDistance
-    viewAngle = camera.GetViewAngle()
-    viewUp = numpy.array(camera.GetViewUp())
-    viewRight = numpy.cross(viewNormal,viewUp)
+        // central difference sample gradient (P is +1, N is -1)
+        float sP00 = S(stpPoint + vec3(%(mmToS)f * gradientSize,0,0));
+        float sN00 = S(stpPoint - vec3(%(mmToS)f * gradientSize,0,0));
+        float s0P0 = S(stpPoint + vec3(0,%(mmToT)f * gradientSize,0));
+        float s0N0 = S(stpPoint - vec3(0,%(mmToT)f * gradientSize,0));
+        float s00P = S(stpPoint + vec3(0,0,%(mmToP)f * gradientSize));
+        float s00N = S(stpPoint - vec3(0,0,%(mmToP)f * gradientSize));
 
-    parameters['eyeRayOrigin'] = "%f, %f, %f" % (viewPosition[0], viewPosition[1], viewPosition[2])
-    parameters['viewNormal'] = "%f, %f, %f" % (viewNormal[0], viewNormal[1], viewNormal[2])
-    parameters['viewRight'] = "%f, %f, %f" % (viewRight[0], viewRight[1], viewRight[2])
-    parameters['viewUp'] = "%f, %f, %f" % (viewUp[0], viewUp[1], viewUp[2])
-    parameters['halfSinViewAngle'] = "%f" % (0.5 * math.cos(math.radians(viewAngle)))
+        // TODO: add Sobel option to filter gradient
+        // https://en.wikipedia.org/wiki/Sobel_operator#Extension_to_other_dimensions
 
-    return parameters
+        vec3 gradient = vec3( (sP00-sN00),
+                              (s0P0-s0N0),
+                              (s00P-s00N) );
+
+        gradientMagnitude = length(gradient);
+
+        // https://en.wikipedia.org/wiki/Normal_(geometry)#Transforming_normals
+        mat3 normalSTPToRAS = mat3(%(normalSTPToRAS)s);
+        vec3 localNormal;
+        localNormal = (-1. / gradientMagnitude) * gradient;
+        normal = normalize(normalSTPToRAS * localNormal);
+      }
+    """ % sampleVolumeParameters
+
+
+#
+# ShaderComputationLogic
+#
+
+class ShaderComputationLogic(ScriptedLoadableModuleLogic):
+  """This class should implement all the actual
+  computation done by your module.  The interface
+  should be such that other python code can import
+  this class and make use of the functionality without
+  requiring an instance of the Widget.
+  Uses ScriptedLoadableModuleLogic base class, available at:
+  https://github.com/Slicer/Slicer/blob/master/Base/Python/slicer/ScriptedLoadableModule.py
+  """
+
+  def __init__(self):
+    ScriptedLoadableModuleLogic.__init__(self)
+    # TODO: these strings can move to a CommonGL spot once debugged
+
+  def headerSource(self):
+    return ("""
+      #version 120
+    """)
 
   def transferFunctionSource(self, volumePropertyNode):
     """Create source code for transfer function that maps
@@ -430,101 +454,62 @@ class ShaderComputationTest(ScriptedLoadableModuleTest):
     """
     return source
 
-  def test_ShaderComputation(self, caller=None, event=None, volumeToRender=None, transformAmplitude=None, transformFrequency=None, transformPhase=None):
-    """ Ideally you should have several levels of tests.  At the lowest level
-    tests should exercise the functionality of the logic with different inputs
-    (both valid and invalid).  At higher levels your tests should emulate the
-    way the user would interact with your code and confirm that it still works
-    the way you intended.
-    One of the most important features of the tests is that it should alert other
-    developers when their changes will have an impact on the behavior of your
-    module.  For example, if a developer removes a feature that you depend on,
-    your test should break so they know that the feature is needed.
+  def rayCastVolumeParameters(self,volumeNode):
+    """Calculate the dictionary of substitutions for the
+    current state of the volume node and camera in a form for
+    substitution into the rayCast shader function
+    TODO: this would probably be better as uniforms, but that
+    requires doing a lot of parsing and data management in C++
     """
 
-    if not hasattr(self, 'sceneObserver'):
-      self.sceneObserver = SceneObserver()
+    parameters = {}
 
-    if not hasattr(self, 'transformAmplitude'):
-      self.transformAmplitude = 0
-    if not hasattr(self, 'transformFrequency'):
-      self.transformFrequency = 1
-    if not hasattr(self, 'transformPhase'):
-      self.transformPhase = 0
+    rasBounds = [0,]*6
+    volumeNode.GetRASBounds(rasBounds)
+    rasBoxMin = (rasBounds[0], rasBounds[2], rasBounds[4])
+    rasBoxMax = (rasBounds[1], rasBounds[3], rasBounds[5])
+    parameters['rasBoxMin'] = "%f, %f, %f" % rasBoxMin
+    parameters['rasBoxMax'] = "%f, %f, %f" % rasBoxMax
 
-    if transformAmplitude != None:
-      self.transformAmplitude = transformAmplitude
-    if transformFrequency != None:
-      self.transformFrequency = transformFrequency
-    if transformPhase != None:
-      self.transformPhase = transformPhase
+    # conservative guesses:
+    # sampleStep is in mm, shortest side in world space divided by max volume dimension
+    # gradientSize is in [0,1] texture space, sampleStep divided by max volume dimensions
 
-    if not volumeToRender and hasattr(self, 'volumeToRender'):
-      volumeToRender = self.volumeToRender
+    rasMinSide = min(rasBoxMax[0] - rasBoxMin[0], rasBoxMax[1] - rasBoxMin[1], rasBoxMax[2] - rasBoxMin[2])
+    maxDimension = max(volumeNode.GetImageData().GetDimensions())
+    parameters['sampleStep'] = 1. * rasMinSide / maxDimension
+    minSpacing = min(volumeNode.GetSpacing())
+    parameters['gradientSize'] = .5 * minSpacing
 
-    if not volumeToRender:
-      import SampleData
-      sampleDataLogic = SampleData.SampleDataLogic()
-      name, method = 'MRHead', sampleDataLogic.downloadMRHead
-      name, method = 'CTACardio', sampleDataLogic.downloadCTACardio
-      volumeToRender = slicer.util.getNode(name)
-      if not volumeToRender:
-        print("Getting Volume")
-        volumeToRender = method()
-    self.volumeToRender = volumeToRender
+    # get the camera parameters from default 3D window
+    layoutManager = slicer.app.layoutManager()
+    threeDWidget = layoutManager.threeDWidget(0)
+    threeDView = threeDWidget.threeDView()
+    renderWindow = threeDView.renderWindow()
+    renderers = renderWindow.GetRenderers()
+    renderer = renderers.GetItemAsObject(0)
+    camera = renderer.GetActiveCamera()
 
-    if False:
-      if not hasattr(self,"ellipsoid"):
-        self.ellipsoid = vtk.vtkImageEllipsoidSource()
-        self.ellipsoid.SetInValue(200)
-        self.ellipsoid.SetOutValue(0)
-        self.ellipsoid.SetOutputScalarTypeToShort()
-        self.ellipsoid.SetCenter(270,270,170)
-        self.ellipsoid.SetWholeExtent(volumeToRender.GetImageData().GetExtent())
-        self.smooth = vtk.vtkImageGaussianSmooth()
-        self.smooth.SetInputConnection(self.ellipsoid.GetOutputPort())
-        self.smooth.SetRadiusFactors(5,5,5)
-        self.smooth.Update()
-      volumeToRender.SetAndObserveImageData(self.smooth.GetOutputDataObject(0))
+    import math
+    import numpy
+    viewPosition = numpy.array(camera.GetPosition())
+    focalPoint = numpy.array(camera.GetFocalPoint())
+    viewDistance = numpy.linalg.norm(focalPoint - viewPosition)
+    viewNormal = (focalPoint - viewPosition) / viewDistance
+    viewAngle = camera.GetViewAngle()
+    viewUp = numpy.array(camera.GetViewUp())
+    viewRight = numpy.cross(viewNormal,viewUp)
 
-    # since the OpenGL texture will be floats in the range 0 to 1, all negative values
-    # will get clamped to zero.  Also if the sample values aren't evenly spread through
-    # the zero to one space we may run into numerical issues.  So rescale the data to the
-    # to fit in the full range of the a 16 bit short.
-    if not hasattr(self,"shiftScale"):
-      self.shiftScale = vtk.vtkImageShiftScale()
-    self.shiftScale.SetInputData(volumeToRender.GetImageData())
-    self.shiftScale.SetOutputScalarTypeToUnsignedShort()
-    low, high = volumeToRender.GetImageData().GetScalarRange()
-    self.shiftScale.SetShift(-low)
-    scale = (1. * vtk.VTK_UNSIGNED_SHORT_MAX) / (high-low)
-    self.shiftScale.SetScale(scale)
-    sampleUnshift = low
-    sampleUnscale = high-low
+    parameters['eyeRayOrigin'] = "%f, %f, %f" % (viewPosition[0], viewPosition[1], viewPosition[2])
+    parameters['viewNormal'] = "%f, %f, %f" % (viewNormal[0], viewNormal[1], viewNormal[2])
+    parameters['viewRight'] = "%f, %f, %f" % (viewRight[0], viewRight[1], viewRight[2])
+    parameters['viewUp'] = "%f, %f, %f" % (viewUp[0], viewUp[1], viewUp[2])
+    parameters['halfSinViewAngle'] = "%f" % (0.5 * math.cos(math.radians(viewAngle)))
 
-    if not hasattr(self,"shaderComputation") and hasattr(slicer.modules.ShaderComputationInstance, "testInstance"):
-      oldSelf = slicer.modules.ShaderComputationInstance.testInstance
-      oldSelf.renderWindow.RemoveObserver(oldSelf.renderTag)
+    return parameters
 
-    if not hasattr(self,"shaderComputation"):
-      print('new shaderComputation')
-      try:
-        from vtkSlicerShadedActorModuleLogicPython import vtkOpenGLShaderComputation
-        from vtkSlicerShadedActorModuleLogicPython import vtkOpenGLTextureImage
-      except ImportError:
-        import vtkAddon
-        vtkOpenGLShaderComputation=vtkAddon.vtkOpenGLShaderComputation
-        vtkOpenGLTextureImage=vtkAddon.vtkOpenGLTextureImage
-      self.shaderComputation=vtkOpenGLShaderComputation()
-      self.textureImage=vtkOpenGLTextureImage()
-      self.textureImage.SetShaderComputation(self.shaderComputation)
-
-    # TODO: these strings can move to a CommonGL spot once debugged
-    headerSource = """
-      #version 120
-    """
-
-    self.shaderComputation.SetVertexShaderSource("""
+  def rayCastVertexShaderSource(self):
+    return ("""
       %(header)s
       attribute vec3 vertexAttribute;
       attribute vec2 textureCoordinateAttribute;
@@ -535,135 +520,11 @@ class ShaderComputationTest(ScriptedLoadableModuleTest):
         gl_Position = vec4(vertexAttribute, 1.);
       }
     """ % {
-      'header' : headerSource
+      'header' : self.headerSource
     })
 
-
-    intersectBoxSource = """
-      bool intersectBox(const in vec3 rayOrigin, const in vec3 rayDirection,
-                        const in vec3 boxMin, const in vec3 boxMax,
-                        out float tNear, out float tFar)
-        // intersect ray with a box
-        // http://www.siggraph.org/education/materials/HyperGraph/raytrace/rtinter3.htm
-      {
-          // compute intersection of ray with all six bbox planes
-          vec3 invRay = vec3(1.) / rayDirection;
-          vec3 tBot = invRay * (boxMin - rayOrigin);
-          vec3 tTop = invRay * (boxMax - rayOrigin);
-
-          // re-order intersections to find smallest and largest on each axis
-          vec3 tMin = min(tTop, tBot);
-          vec3 tMax = max(tTop, tBot);
-
-          // find the largest tMin and the smallest tMax
-          float largest_tMin = max(max(tMin.x, tMin.y), max(tMin.x, tMin.z));
-          float smallest_tMax = min(min(tMax.x, tMax.y), min(tMax.x, tMax.z));
-
-          tNear = largest_tMin;
-          tFar = smallest_tMax;
-
-          return smallest_tMax > largest_tMin;
-      }
-    """
-    transformPointSource = """
-      vec3 transformPoint(const in vec3 samplePoint)
-      // Apply a spatial transformation to a world space point
-      {
-          // TODO: get MRMLTransformNodes as vector fields
-          float frequency = %(frequency)f;
-          float phase = %(phase)f;
-          return samplePoint + %(amplitude)f * vec3(samplePoint.x * sin(phase + frequency * samplePoint.z),
-                                                    samplePoint.y * cos(phase + frequency * samplePoint.z),
-                                                    0);
-      }
-    """ % {
-        'amplitude' : self.transformAmplitude,
-        'frequency' : self.transformFrequency,
-        'phase' : self.transformPhase
-    }
-
-    sampleVolumeParameters = self.sampleVolumeParameters(volumeToRender)
-    sampleVolumeParameters.update({
-          'sampleUnshift' : sampleUnshift,
-          'sampleUnscale' : sampleUnscale,
-    })
-    sampleVolumeSource = """
-      float textureSampleDenormalized(const in sampler3D volumeTextureUnit, const in vec3 stpPoint) {
-        return ( texture3D(volumeTextureUnit, stpPoint).r * %(sampleUnscale)f + %(sampleUnshift)f );
-      }
-
-      void sampleVolume(const in sampler3D volumeTextureUnit, const in vec3 samplePoint, const in float gradientSize,
-                        out float sample, out vec3 normal, out float gradientMagnitude)
-      {
-        // vectors to map RAS to stp
-        vec4 rasToS =  vec4( %(rasToS)s );
-        vec4 rasToT =  vec4( %(rasToT)s );
-        vec4 rasToP =  vec4( %(rasToP)s );
-
-        vec3 stpPoint;
-        vec4 sampleCoordinate = vec4(samplePoint, 1.);
-        stpPoint.s = dot(rasToS,sampleCoordinate);
-        stpPoint.t = dot(rasToT,sampleCoordinate);
-        stpPoint.p = dot(rasToP,sampleCoordinate);
-
-        #define S(point) textureSampleDenormalized(volumeTextureUnit, point)
-
-        // read from 3D texture
-        sample = S(stpPoint);
-
-        // central difference sample gradient (P is +1, N is -1)
-        float sP00 = S(stpPoint + vec3(%(mmToS)f * gradientSize,0,0));
-        float sN00 = S(stpPoint - vec3(%(mmToS)f * gradientSize,0,0));
-        float s0P0 = S(stpPoint + vec3(0,%(mmToT)f * gradientSize,0));
-        float s0N0 = S(stpPoint - vec3(0,%(mmToT)f * gradientSize,0));
-        float s00P = S(stpPoint + vec3(0,0,%(mmToP)f * gradientSize));
-        float s00N = S(stpPoint - vec3(0,0,%(mmToP)f * gradientSize));
-
-        // TODO: add Sobel option to filter gradient
-        // https://en.wikipedia.org/wiki/Sobel_operator#Extension_to_other_dimensions
-
-        vec3 gradient = vec3( (sP00-sN00),
-                              (s0P0-s0N0),
-                              (s00P-s00N) );
-
-        gradientMagnitude = length(gradient);
-
-        // https://en.wikipedia.org/wiki/Normal_(geometry)#Transforming_normals
-        mat3 normalSTPToRAS = mat3(%(normalSTPToRAS)s);
-        vec3 localNormal;
-        localNormal = (-1. / gradientMagnitude) * gradient;
-        normal = normalize(normalSTPToRAS * localNormal);
-
-      }
-    """ % sampleVolumeParameters
-
-    # create a volume property node in the scene if needed.  This is used
-    # for the color transfer function and can be manipulated in the
-    # Slicer Volume Rendering module widget
-    volumePropertyNode = slicer.util.getNode('ShaderVolumeProperty')
-    if not volumePropertyNode:
-      volumePropertyNode = slicer.vtkMRMLVolumePropertyNode()
-      volumePropertyNode.SetName('ShaderVolumeProperty')
-      scalarOpacity = vtk.vtkPiecewiseFunction()
-      points = ( (-1024., 0.), (20., 0.), (300., 1.), (3532., 1.) )
-      for point in points:
-        scalarOpacity.AddPoint(*point)
-      volumePropertyNode.SetScalarOpacity(scalarOpacity)
-      colorTransfer = vtk.vtkColorTransferFunction()
-      colors = ( (-1024., (0., 0., 0.)), (3., (0., 0., 0.)), (131., (1., 1., 0.)) )
-      colors = ( (-1024., (0., 0., 0.)), (-984., (0., 0., 0.)), (469., (1., 1., 1.)) )
-      for intensity,rgb in colors:
-        colorTransfer.AddRGBPoint(intensity, *rgb)
-      volumePropertyNode.SetScalarOpacity(scalarOpacity)
-      volumePropertyNode.SetColor(colorTransfer, 0)
-      slicer.mrmlScene.AddNode(volumePropertyNode)
-    transferFunctionSource = self.transferFunctionSource(volumePropertyNode)
-
-    rayCastParameters = self.rayCastVolumeParameters(volumeToRender)
-    rayCastParameters.update({
-          'rayMaxSteps' : 500000,
-    })
-    rayCastSource = """
+  def rayCastFragmentSource(self):
+    return("""
       // volume ray caster - starts from the front and collects color and opacity
       // contributions until fully saturated.
       // Sample coordinate is 0->1 texture space
@@ -767,7 +628,157 @@ class ShaderComputationTest(ScriptedLoadableModuleTest):
         }
         return(vec4(mix(backgroundRGBA.rgb, integratedPixel.rgb, integratedPixel.a), 1.));
       }
-    """ % rayCastParameters
+    """)
+
+  def intersectBoxSource(self):
+    return ("""
+      bool intersectBox(const in vec3 rayOrigin, const in vec3 rayDirection,
+                        const in vec3 boxMin, const in vec3 boxMax,
+                        out float tNear, out float tFar)
+        // intersect ray with a box
+        // http://www.siggraph.org/education/materials/HyperGraph/raytrace/rtinter3.htm
+      {
+          // compute intersection of ray with all six bbox planes
+          vec3 invRay = vec3(1.) / rayDirection;
+          vec3 tBot = invRay * (boxMin - rayOrigin);
+          vec3 tTop = invRay * (boxMax - rayOrigin);
+
+          // re-order intersections to find smallest and largest on each axis
+          vec3 tMin = min(tTop, tBot);
+          vec3 tMax = max(tTop, tBot);
+
+          // find the largest tMin and the smallest tMax
+          float largest_tMin = max(max(tMin.x, tMin.y), max(tMin.x, tMin.z));
+          float smallest_tMax = min(min(tMax.x, tMax.y), min(tMax.x, tMax.z));
+
+          tNear = largest_tMin;
+          tFar = smallest_tMax;
+
+          return smallest_tMax > largest_tMin;
+      }
+    """)
+
+  def demoTransformPointSource(self):
+    return ("""
+      vec3 transformPoint(const in vec3 samplePoint)
+      // Apply a spatial transformation to a world space point
+      {
+          // TODO: get MRMLTransformNodes as vector fields
+          float frequency = %(frequency)f;
+          float phase = %(phase)f;
+          return samplePoint + %(amplitude)f * vec3(samplePoint.x * sin(phase + frequency * samplePoint.z),
+                                                    samplePoint.y * cos(phase + frequency * samplePoint.z),
+                                                    0);
+      }
+    """ % {
+        'amplitude' : self.transformAmplitude,
+        'frequency' : self.transformFrequency,
+        'phase' : self.transformPhase
+    })
+
+
+class ShaderComputationTest(ScriptedLoadableModuleTest):
+  """
+  This is the test case for your scripted module.
+  Uses ScriptedLoadableModuleTest base class, available at:
+  https://github.com/Slicer/Slicer/blob/master/Base/Python/slicer/ScriptedLoadableModule.py
+  """
+
+  def setUp(self):
+    """ Do whatever is needed to reset the state - typically a scene clear will be enough.
+    """
+    self.logic = ShaderComputationLogic()
+
+    if not hasattr(self, 'sceneObserver'):
+      self.sceneObserver = SceneObserver()
+
+    self.transformAmplitude = 0
+    self.transformFrequency = 1
+    self.transformPhase = 0
+
+  def runTest(self):
+    """Run as few or as many tests as needed here.
+    """
+    self.setUp()
+    self.test_ShaderComputation()
+
+  def addDefaultVolumeProperty(self):
+    # create a volume property node in the scene if needed.  This is used
+    # for the color transfer function and can be manipulated in the
+    # Slicer Volume Rendering module widget
+    volumePropertyNode = slicer.util.getNode('ShaderVolumeProperty')
+    if not volumePropertyNode:
+      volumePropertyNode = slicer.vtkMRMLVolumePropertyNode()
+      volumePropertyNode.SetName('ShaderVolumeProperty')
+      scalarOpacity = vtk.vtkPiecewiseFunction()
+      points = ( (-1024., 0.), (20., 0.), (300., 1.), (3532., 1.) )
+      for point in points:
+        scalarOpacity.AddPoint(*point)
+      volumePropertyNode.SetScalarOpacity(scalarOpacity)
+      colorTransfer = vtk.vtkColorTransferFunction()
+      colors = ( (-1024., (0., 0., 0.)), (3., (0., 0., 0.)), (131., (1., 1., 0.)) )
+      colors = ( (-1024., (0., 0., 0.)), (-984., (0., 0., 0.)), (469., (1., 1., 1.)) )
+      for intensity,rgb in colors:
+        colorTransfer.AddRGBPoint(intensity, *rgb)
+      volumePropertyNode.SetScalarOpacity(scalarOpacity)
+      volumePropertyNode.SetColor(colorTransfer, 0)
+      slicer.mrmlScene.AddNode(volumePropertyNode)
+
+  def loadVolume(self, volumeToRender):
+    """unless given a volume in the constructor make sure
+    there is a volume and set the instance variable"""
+    if not volumeToRender and hasattr(self, 'volumeToRender'):
+      volumeToRender = self.volumeToRender
+
+    if not volumeToRender:
+      import SampleData
+      sampleDataLogic = SampleData.SampleDataLogic()
+      name, method = 'CTACardio', sampleDataLogic.downloadCTACardio
+      name, method = 'MRHead', sampleDataLogic.downloadMRHead
+      volumeToRender = slicer.util.getNode(name)
+      if not volumeToRender:
+        print("Getting Volume")
+        volumeToRender = method()
+    self.volumeToRender = volumeToRender
+
+  def test_ShaderComputation(self, caller=None, event=None, volumeToRender=None):
+    """ Ideally you should have several levels of tests.  At the lowest level
+    tests should exercise the functionality of the logic with different inputs
+    (both valid and invalid).  At higher levels your tests should emulate the
+    way the user would interact with your code and confirm that it still works
+    the way you intended.
+    One of the most important features of the tests is that it should alert other
+    developers when their changes will have an impact on the behavior of your
+    module.  For example, if a developer removes a feature that you depend on,
+    your test should break so they know that the feature is needed.
+    """
+
+
+    self.loadVolume(volumeToRender)
+
+    if not hasattr(self,"shaderComputation") and hasattr(slicer.modules.ShaderComputationInstance, "testInstance"):
+      oldSelf = slicer.modules.ShaderComputationInstance.testInstance
+      oldSelf.renderWindow.RemoveObserver(oldSelf.renderTag)
+
+    if not hasattr(self,"shaderComputation"):
+      print('new shaderComputation')
+      try:
+        from vtkSlicerShadedActorModuleLogicPython import vtkOpenGLShaderComputation
+      except ImportError:
+        import vtkAddon
+        vtkOpenGLShaderComputation=vtkAddon.vtkOpenGLShaderComputation
+      self.shaderComputation=vtkOpenGLShaderComputation()
+      self.volumeTexture = VolumeTexture(self.shaderComputation, 15, self.volumeToRender)
+
+    self.shaderComputation.SetVertexShaderSource(self.logic.rayCastVertexShaderSource())
+
+    self.addDefaultVolumeProperty()
+
+    rayCastParameters = self.logic.rayCastVolumeParameters(volumeToRender)
+    rayCastParameters.update({
+          'rayMaxSteps' : 500000,
+    })
+    rayCastSource = self.logic.rayCastFragmentSource() % rayCastParameters
 
     self.shaderComputation.SetFragmentShaderSource("""
       %(header)s
@@ -784,11 +795,11 @@ class ShaderComputationTest(ScriptedLoadableModuleTest):
         gl_FragColor = rayCast(interpolatedTextureCoordinate, textureUnit15);
       }
     """ % {
-      'header' : headerSource,
-      'intersectBox' : intersectBoxSource,
-      'transformPoint' : transformPointSource,
-      'sampleVolume' : sampleVolumeSource,
-      'transferFunction' : transferFunctionSource,
+      'header' : self.logic.headerSource(),
+      'intersectBox' : self.logic.intersectBoxSource(),
+      'transformPoint' : self.logic.demoTransformPointSource(),
+      'sampleVolume' : self.volumeTexture.sampleVolumeSource(),
+      'transferFunction' : self.logic.transferFunctionSource(volumePropertyNode)
       'rayCast' : rayCastSource,
     })
 

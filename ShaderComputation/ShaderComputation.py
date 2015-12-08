@@ -113,7 +113,7 @@ class ShaderComputationWidget(ScriptedLoadableModuleWidget):
     parametersFormLayout.addRow("Apply Transform", self.applyTransformCheckBox)
 
     # connections
-    self.renderSelector.connect("currentNodeChanged(vtkMRMLNode*)", self.onTransformChange)
+    self.renderSelector.connect("currentNodeChanged(vtkMRMLNode*)", self.onVolumeChange)
     self.transformAmplitude.connect("valueChanged(double)", self.onTransformChange)
     self.transformFrequency.connect("valueChanged(double)", self.onTransformChange)
     self.transformPhase.connect("valueChanged(double)", self.onTransformChange)
@@ -159,6 +159,11 @@ class ShaderComputationWidget(ScriptedLoadableModuleWidget):
     self.sceneRenderer.transformPointSource = self.demoTransformPointSource()
     self.sceneRenderer.render()
 
+  def onVolumeChange(self):
+    """Perform the render when any input changes"""
+    self.sceneRenderer.setVolume(self.renderSelector.currentNode())
+    self.sceneRenderer.render()
+
 
 from slicer.util import VTKObservationMixin
 class SceneObserver(VTKObservationMixin):
@@ -166,12 +171,12 @@ class SceneObserver(VTKObservationMixin):
   TODO: add a simple way for users of this class to subscribe
   to patterns of events, such as adds/removals of certain classes
   of nodes, or events from any node of a given node class.
+  TODO: if this experiment proves useful it could migrate to slicer.util
   """
 
   def __init__(self, scene=None):
     """Add observers to the mrmlScene and also to all the nodes of the scene"""
     VTKObservationMixin.__init__(self)
-    print('scene observer created')
 
     if scene:
       self._scene = scene
@@ -192,7 +197,6 @@ class SceneObserver(VTKObservationMixin):
     self._triggers = {}
 
   def __del__(self):
-    print('scene observer deleted')
     self.removeObservers()
 
   def _observeNode(self,node):
@@ -215,16 +219,17 @@ class SceneObserver(VTKObservationMixin):
     self.removeObserver(node, vtk.vtkCommand.AnyEvent, self._onNodeModified)
     self._trigger(node.GetClassName(), "RemovedEvent")
 
-  def _onNodeModified(self,node,eventName):
-    self._trigger(node.GetClassName(), eventName)
-
   def _trigger(self, className, eventName):
     key = (className,eventName)
     if key in self._triggers:
       for callback in self._triggers[key]:
         callback()
 
+  def _onNodeModified(self,node,eventName):
+    self._trigger(node.GetClassName(), eventName)
+
   def _key(self, nodeKey, eventKey):
+    """Convert shorthand notation to full class and event name"""
     return ("vtkMRML%sNode"%nodeKey,"%sEvent"%eventKey)
 
   def addTrigger(self, nodeKey, eventKey, callback):
@@ -240,15 +245,125 @@ class SceneObserver(VTKObservationMixin):
         self._triggers[key].remove(callback)
 
 
+class FieldSampler(object):
+  """This is a generic superclass for objects that define samplable fields
+  in space based on data in the mrml scene.  Being samplable means that the
+  class can generate an rgba and spatial gradient at any point in space.
+  (TODO: spacetime).
+  A field sampler is associated with a shaderComputation instance which
+  defines the rendering context and a textureUnit that is available
+  to store a vtkImageData.
+  The field sampler includes methods that return glsl code
+  needed to implement the sampling operation.
+  """
 
-class VolumeTexture(object):
+  def __init__(self, shaderComputation, textureUnit, node):
+    self.shaderComputation = shaderComputation
+    self.textureUnit = textureUnit
+    self.node = node
+
+  def checkResources(self):
+    """TODO: look at the data and determine how much of the available OpenGL
+    resources will be needed to represent it.  Intended to be overridden"""
+    logging.warn("FieldSampler.checkResources method should be overriden by subclass")
+
+  def updateFromMRML(self):
+    """Do whatever is needed to pass data or state from MRML
+    nodes into GPU context.  Intended to be overridden"""
+    logging.warn("FieldSampler.updateFromMRML method should be overriden by subclass")
+
+  def fieldSampleSource(self):
+    """Return a snippet of glsl code that can be used to
+    sample this field.  Intended to be overridden"""
+    logging.warn("FieldSampler.fieldSampleSource method should be overriden by subclass")
+
+
+class Fiducials(FieldSampler):
+  """Treats a fiducial point as a spherical field.
+  """
+
+  def __init__(self, shaderComputation, textureUnit, node):
+    self.shaderComputation = shaderComputation
+    self.textureUnit = textureUnit
+    self.node = node
+
+    self.dummyImage = vtk.vtkImageData()
+    self.dummyImage.SetDimensions(1,1,1)
+    self.dummyImage.AllocateScalars(vtk.VTK_SHORT, 1)
+    try:
+      from vtkSlicerShadedActorModuleLogicPython import vtkOpenGLTextureImage
+    except ImportError:
+      import vtkAddon
+      vtkOpenGLTextureImage=vtkAddon.vtkOpenGLTextureImage
+    self.textureImage=vtkOpenGLTextureImage()
+    self.textureImage.SetShaderComputation(self.shaderComputation)
+    self.textureImage.SetImageData(self.dummyImage)
+
+  def updateFromMRML(self):
+    """Do whatever is needed to pass data or state from MRML
+    nodes into GPU context.  Intended to be overridden"""
+    pass
+    self.textureImage.Activate(self.textureUnit);
+
+  def fieldSampleSource(self):
+    """Return the GLSL code to sample our volume in space"""
+
+    shaderFiducials = slicer.util.getNode('shaderFiducials')
+    if not shaderFiducials:
+      logger.error('no fiducials')
+
+    # each fiducial is checked and if inside, returns sample
+    fiducialSampleTemplate = """
+        centerToSample = samplePoint-vec3( %(fiducialString)s );
+        distance = length(centerToSample);
+        if (distance < glow * %(radius)s) {
+            sample = 1000.; // TODO could be variable
+            sample *= smoothstep(distance / glow, distance * glow, distance);
+
+            normal = normalize(centerToSample);
+            gradientMagnitude = distance;
+            return;
+        }
+    """
+
+    fiducialDisplayNode = shaderFiducials.GetDisplayNode()
+    radius = fiducialDisplayNode.GetGlyphScale()
+    fiducialCenter = [0,]*3
+    fiducialSampleSource = ""
+    for markupIndex in range(shaderFiducials.GetNumberOfMarkups()):
+      shaderFiducials.GetNthFiducialPosition(markupIndex,fiducialCenter)
+      fiducialCenterString = "%f,%f,%f" % tuple(fiducialCenter)
+      fiducialSampleSource += fiducialSampleTemplate % {
+                'radius' : str(radius),
+                'fiducialString' : fiducialCenterString
+              }
+
+
+    fieldSampleSource = """
+      void sampleVolume(const in sampler3D volumeTextureUnit, const in vec3 samplePoint, const in float gradientSize,
+                        out float sample, out vec3 normal, out float gradientMagnitude)
+      {
+        vec3 centerToSample;
+        float distance;
+        float glow = 1.2;
+
+        %(fiducialSampleSource)s
+
+        // default if sample is not in fiducial
+        sample = 0.;
+        normal = vec3(1,0,0);
+        gradientMagnitude = 1.;
+      }
+    """ % { 'fiducialSampleSource' : fiducialSampleSource }
+    return fieldSampleSource
+
+
+class VolumeTexture(FieldSampler):
   """Maps a volume node to a GLSL renderable collection
   of textures and code"""
 
   def __init__(self, shaderComputation, textureUnit, volumeNode):
-    self.shaderComputation = shaderComputation
-    self.textureUnit = textureUnit
-    self.volumeNode = volumeNode
+    FieldSampler.__init__(self, shaderComputation, textureUnit, volumeNode)
     self.shiftScale = vtk.vtkImageShiftScale()
 
     try:
@@ -259,19 +374,22 @@ class VolumeTexture(object):
     self.textureImage=vtkOpenGLTextureImage()
     self.textureImage.SetShaderComputation(self.shaderComputation)
 
-    self.updateTextureImage()
+    self.updateFromMRML()
 
-  def updateTextureImage(self):
+  def updateFromMRML(self):
     # since the OpenGL texture will be floats in the range 0 to 1, all negative values
     # will get clamped to zero.  Also if the sample values aren't evenly spread through
     # the zero to one space we may run into numerical issues.  So rescale the data to the
     # to fit in the full range of the a 16 bit short.
     # (any vtkImageData scalar type should work with this approach)
-    self.shiftScale.SetInputData(self.volumeNode.GetImageData())
+    self.shiftScale.SetInputData(self.node.GetImageData())
     self.shiftScale.SetOutputScalarTypeToUnsignedShort()
-    low, high = self.volumeNode.GetImageData().GetScalarRange()
+    low, high = self.node.GetImageData().GetScalarRange()
     self.shiftScale.SetShift(-low)
-    scale = (1. * vtk.VTK_UNSIGNED_SHORT_MAX) / (high-low)
+    if high == low:
+      scale = 1.
+    else:
+      scale = (1. * vtk.VTK_UNSIGNED_SHORT_MAX) / (high-low)
     self.shiftScale.SetScale(scale)
     self.sampleUnshift = low
     self.sampleUnscale = high-low
@@ -289,9 +407,9 @@ class VolumeTexture(object):
     """
 
     rasToIJK = vtk.vtkMatrix4x4()
-    self.volumeNode.GetRASToIJKMatrix(rasToIJK)
+    self.node.GetRASToIJKMatrix(rasToIJK)
 
-    transformNode = self.volumeNode.GetParentTransformNode()
+    transformNode = self.node.GetParentTransformNode()
     if transformNode:
       if transformNode.IsTransformToWorldLinear():
         rasToRAS = vtk.vtkMatrix4x4()
@@ -299,11 +417,11 @@ class VolumeTexture(object):
         rasToRAS.Invert()
         rasToRAS.Multiply4x4(rasToIJK, rasToRAS, rasToIJK)
       else:
-        print('Cannot handle nonlinear transforms')
+        error.warn('Cannot handle nonlinear transforms')
 
     # dimensions are number of pixels in (row, column, slice)
     # which maps to 0-1 space of S, T, P
-    dimensions = self.volumeNode.GetImageData().GetDimensions()
+    dimensions = self.node.GetImageData().GetDimensions()
     ijkToSTP = vtk.vtkMatrix4x4()
     ijkToSTP.Identity()
     for diagonal in range(3):
@@ -324,7 +442,7 @@ class VolumeTexture(object):
     # since texture is 0-1, take into account both pixel spacing
     # and dimension as layed out in memory so that the normals
     # is calculated in a uniform space
-    spacings = self.volumeNode.GetSpacing()
+    spacings = self.node.GetSpacing()
     parameters['mmToS'] = spacings[0] / dimensions[0]
     parameters['mmToT'] = spacings[1] / dimensions[1]
     parameters['mmToP'] = spacings[2] / dimensions[2]
@@ -345,7 +463,7 @@ class VolumeTexture(object):
 
     return parameters
 
-  def sampleVolumeSource(self):
+  def fieldSampleSource(self):
     """Return the GLSL code to sample our volume in space"""
 
     sampleVolumeParameters = self.sampleVolumeParameters()
@@ -353,7 +471,7 @@ class VolumeTexture(object):
           'sampleUnshift' : self.sampleUnshift,
           'sampleUnscale' : self.sampleUnscale,
     })
-    sampleVolumeSource = """
+    fieldSampleSource = """
       float textureSampleDenormalized(const in sampler3D volumeTextureUnit, const in vec3 stpPoint) {
         return ( texture3D(volumeTextureUnit, stpPoint).r * %(sampleUnscale)f + %(sampleUnshift)f );
       }
@@ -401,7 +519,7 @@ class VolumeTexture(object):
         normal = normalize(normalSTPToRAS * localNormal);
       }
     """ % sampleVolumeParameters
-    return sampleVolumeSource
+    return fieldSampleSource
 
 class SceneRenderer(object):
   """A class to render the current mrml scene as using shader computation"""
@@ -420,7 +538,7 @@ class SceneRenderer(object):
     self.shaderComputation.SetVertexShaderSource(self.logic.rayCastVertexShaderSource())
 
     self.resultImage = vtk.vtkImageData()
-    self.resultImage.SetDimensions(512, 512, 1)
+    self.resultImage.SetDimensions(1024, 1024, 1)
     self.resultImage.AllocateScalars(vtk.VTK_UNSIGNED_CHAR, 4)
     self.shaderComputation.SetResultImageData(self.resultImage)
 
@@ -438,12 +556,15 @@ class SceneRenderer(object):
     else:
       self.scene = slicer.mrmlScene
     self.sceneObserver = SceneObserver(self.scene)
-    self.sceneObserver.addTrigger("ScalarVolume", "Added", self.onVolumeAdded)
     self.sceneObserver.addTrigger("ScalarVolume", "Removed", self.onVolumeRemoved)
     self.sceneObserver.addTrigger("ScalarVolume", "Modified", self.requestRender)
+    self.sceneObserver.addTrigger("ScalarVolume", "ImageDataModified", self.requestRender)
+    self.sceneObserver.addTrigger("LabelMapVolume", "Modified", self.requestRender)
+    self.sceneObserver.addTrigger("LabelMapVolume", "ImageDataModified", self.requestRender)
     self.sceneObserver.addTrigger("Camera", "Modified", self.requestRender)
     self.sceneObserver.addTrigger("Transform", "Modified", self.requestRender)
     self.sceneObserver.addTrigger("VolumeProperty", "Modified", self.requestRender)
+    self.sceneObserver.addTrigger("MarkupsFiducial", "Modified", self.requestRender)
     self.renderPending = False
 
   def cleanup(self):
@@ -452,6 +573,12 @@ class SceneRenderer(object):
     self.volumeTexture = None
     self.shaderComputation = None
     self.imageViewer = None
+
+  def setVolume(self, volumeNode):
+    self.volumeTexture = VolumeTexture(self.shaderComputation, 15, volumeNode)
+
+    # TODO: for testing
+    self.volumeTexture = Fiducials(self.shaderComputation, 15, volumeNode)
 
   def onVolumeAdded(self):
     # TODO: make one VolumeTexture per volumeNode
@@ -468,18 +595,18 @@ class SceneRenderer(object):
     self.volumePropertyNode = slicer.util.getNode('ShaderVolumeProperty')
 
     if not self.volumeTexture or not self.volumePropertyNode:
-      print ("can't render without volume")
+      logging.error ("can't render without volume")
       return
 
     if not self.shaderComputation:
-      print("can't render without computation context")
+      logging.error("can't render without computation context")
       return
 
-    self.volumeTexture.updateTextureImage()
+    self.volumeTexture.updateFromMRML()
 
-    rayCastParameters = self.logic.rayCastVolumeParameters(self.volumeTexture.volumeNode)
+    rayCastParameters = self.logic.rayCastVolumeParameters(self.volumeTexture.node)
     rayCastParameters.update({
-          'rayMaxSteps' : 500000,
+          'rayMaxSteps' : 100000,
     })
     rayCastSource = self.logic.rayCastFragmentSource() % rayCastParameters
 
@@ -492,16 +619,17 @@ class SceneRenderer(object):
       %(rayCast)s
 
       varying vec3 interpolatedTextureCoordinate;
-      uniform sampler3D textureUnit15;
+      uniform sampler3D textureUnit%(textureUnit)s;
       void main()
       {
-        gl_FragColor = rayCast(interpolatedTextureCoordinate, textureUnit15);
+        gl_FragColor = rayCast(interpolatedTextureCoordinate, textureUnit%(textureUnit)s);
       }
     """ % {
       'header' : self.logic.headerSource(),
       'intersectBox' : self.logic.intersectBoxSource(),
       'transformPoint' : self.transformPointSource,
-      'sampleVolume' : self.volumeTexture.sampleVolumeSource(),
+      'sampleVolume' : self.volumeTexture.fieldSampleSource(),
+      'textureUnit' : self.volumeTexture.textureUnit,
       'transferFunction' : self.logic.transferFunctionSource(self.volumePropertyNode),
       'rayCast' : rayCastSource,
     })
@@ -534,13 +662,8 @@ class SceneRenderer(object):
 #
 
 class ShaderComputationLogic(ScriptedLoadableModuleLogic):
-  """This class should implement all the actual
-  computation done by your module.  The interface
-  should be such that other python code can import
-  this class and make use of the functionality without
-  requiring an instance of the Widget.
-  Uses ScriptedLoadableModuleLogic base class, available at:
-  https://github.com/Slicer/Slicer/blob/master/Base/Python/slicer/ScriptedLoadableModule.py
+  """Helper methods to map from slicer/vtk conventions
+  to glsl code.
   """
 
   def __init__(self):
@@ -561,7 +684,7 @@ class ShaderComputationLogic(ScriptedLoadableModuleLogic):
     colorTransfer = volumePropertyNode.GetColor(0)
 
     source = """
-    void transferFunction(const in float sample, const in float gradientMagnitude,
+    void transferFunction(const in float sample, const in float gradientMagnitude /* TODO: not used */,
                           out vec3 color, out float opacity)
     {
     """
@@ -706,7 +829,7 @@ class ShaderComputationLogic(ScriptedLoadableModuleLogic):
 
   def rayCastFragmentSource(self):
     return("""
-      // volume ray caster - starts from the front and collects color and opacity
+      // field ray caster - starts from the front and collects color and opacity
       // contributions until fully saturated.
       // Sample coordinate is 0->1 texture space
       vec4 rayCast( in vec3 sampleCoordinate, in sampler3D volumeTextureUnit )
@@ -727,7 +850,7 @@ class ShaderComputationLogic(ScriptedLoadableModuleLogic):
                                       + ( %(halfSinViewAngle)s * normalizedCoordinate.y * vec3( %(viewUp)s    ) ) );
 
 
-        vec3 pointLight = vec3(200., 2500., 1000.); // TODO
+        vec3 pointLight = vec3(200., 2500., 1000.); // TODO - lighting model
 
         // find intersection with box, possibly terminate early
         float tNear, tFar;
@@ -750,7 +873,8 @@ class ShaderComputationLogic(ScriptedLoadableModuleLogic):
 
           vec3 samplePoint = eyeRayOrigin + eyeRayDirection * tCurrent;
 
-          // TODO: transform should be applied to the normal too
+          // TODO: transform should be associated with the sampling, not the ray point
+          //       so that gradient is calculated incorporating transform
           samplePoint = transformPoint(samplePoint);
 
           vec3 normal;
@@ -780,7 +904,6 @@ class ShaderComputationLogic(ScriptedLoadableModuleLogic):
 
           vec3 phongColor = Kambient * Cambient;
           vec3 pointToEye = normalize(eyeRayOrigin - samplePoint);
-
 
           if (dot(pointToEye, normal) > 0.) {
             vec3 pointToLight = normalize(pointLight - samplePoint);
@@ -882,17 +1005,41 @@ class ShaderComputationTest(ScriptedLoadableModuleTest):
       slicer.mrmlScene.AddNode(volumePropertyNode)
     self.volumePropertyNode = volumePropertyNode
 
-  def loadVolume(self):
+  def addVolume(self):
     """unless given a volume in the constructor make sure
     there is a volume and set the instance variable"""
     import SampleData
     sampleDataLogic = SampleData.SampleDataLogic()
-    name, method = 'CTACardio', sampleDataLogic.downloadCTACardio
     name, method = 'MRHead', sampleDataLogic.downloadMRHead
+    name, method = 'CTACardio', sampleDataLogic.downloadCTACardio
     volumeToRender = slicer.util.getNode(name)
     if not volumeToRender:
-      print("Getting Volume")
+      logging.info("Getting Volume %s" % name)
       volumeToRender = method()
+
+  def addFiducials(self):
+    shaderFiducials = slicer.util.getNode('shaderFiducials')
+    if not shaderFiducials:
+      displayNode = slicer.vtkMRMLMarkupsDisplayNode()
+      slicer.mrmlScene.AddNode(displayNode)
+      fiducialNode = slicer.vtkMRMLMarkupsFiducialNode()
+      fiducialNode.SetName('shaderFiducials')
+      slicer.mrmlScene.AddNode(fiducialNode)
+      fiducialNode.SetAndObserveDisplayNodeID(displayNode.GetID())
+      for ras in ((28.338526, 34.064367, 10), (-10, 0, -5)):
+        fiducialNode.AddFiducial(*ras)
+      import random
+      fiducialCount = 10
+      radius = 75
+      for index in range(fiducialCount):
+        uvw = [random.random(), random.random(), random.random()]
+        ras = map(lambda e: radius * (2. * e - 1.), uvw)
+        fiducialNode.AddFiducial(*ras)
+
+      # make it active
+      selectionNode = slicer.mrmlScene.GetNodeByID("vtkMRMLSelectionNodeSingleton")
+      if (selectionNode is not None):
+        selectionNode.SetReferenceActivePlaceNodeID(fiducialNode.GetID())
 
   def test_ShaderComputation(self):
     """ Ideally you should have several levels of tests.  At the lowest level
@@ -906,5 +1053,6 @@ class ShaderComputationTest(ScriptedLoadableModuleTest):
     your test should break so they know that the feature is needed.
     """
 
+    self.addFiducials()
     self.addDefaultVolumeProperty()
-    self.loadVolume()
+    self.addVolume()

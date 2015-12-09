@@ -340,12 +340,16 @@ class Fiducials(FieldSampler):
 
 
     fieldSampleSource = """
-      void sampleVolume(const in sampler3D volumeTextureUnit, const in vec3 samplePoint, const in float gradientSize,
+      void sampleVolume%(textureUnit)s(const in sampler3D volumeTextureUnit, const in vec3 samplePointIn, const in float gradientSize,
                         out float sample, out vec3 normal, out float gradientMagnitude)
       {
+        // TODO: transform should be associated with the sampling, not the ray point
+        //       so that gradient is calculated incorporating transform
+        vec3 samplePoint = transformPoint(samplePointIn);
+
         vec3 centerToSample;
         float distance;
-        float glow = 1.2;
+        float glow = 2.2;
 
         %(fiducialSampleSource)s
 
@@ -354,7 +358,10 @@ class Fiducials(FieldSampler):
         normal = vec3(1,0,0);
         gradientMagnitude = 1.;
       }
-    """ % { 'fiducialSampleSource' : fiducialSampleSource }
+    """ % {
+        'fiducialSampleSource' : fiducialSampleSource,
+        'textureUnit' : self.textureUnit,
+        }
     return fieldSampleSource
 
 
@@ -464,21 +471,29 @@ class VolumeTexture(FieldSampler):
     return parameters
 
   def fieldSampleSource(self):
-    """Return the GLSL code to sample our volume in space"""
+    """Return the GLSL code to sample our volume in space
+    Function names are postpended with texure unit number to avoid name clashes.
+    """
 
     sampleVolumeParameters = self.sampleVolumeParameters()
     sampleVolumeParameters.update({
           'sampleUnshift' : self.sampleUnshift,
           'sampleUnscale' : self.sampleUnscale,
+          'textureUnit' : self.textureUnit,
     })
     fieldSampleSource = """
-      float textureSampleDenormalized(const in sampler3D volumeTextureUnit, const in vec3 stpPoint) {
+      float textureSampleDenormalized%(textureUnit)s(const in sampler3D volumeTextureUnit, const in vec3 stpPoint) {
         return ( texture3D(volumeTextureUnit, stpPoint).r * %(sampleUnscale)f + %(sampleUnshift)f );
       }
 
-      void sampleVolume(const in sampler3D volumeTextureUnit, const in vec3 samplePoint, const in float gradientSize,
+      void sampleVolume%(textureUnit)s(const in sampler3D volumeTextureUnit, const in vec3 samplePointIn, const in float gradientSize,
                         out float sample, out vec3 normal, out float gradientMagnitude)
       {
+
+        // TODO: transform should be applied to each sample in the gradient estimation
+        //       so that gradient is calculated incorporating transform.
+        vec3 samplePoint = transformPoint(samplePointIn);
+
         // vectors to map RAS to stp
         vec4 rasToS =  vec4( %(rasToS)s );
         vec4 rasToT =  vec4( %(rasToT)s );
@@ -490,7 +505,7 @@ class VolumeTexture(FieldSampler):
         stpPoint.t = dot(rasToT,sampleCoordinate);
         stpPoint.p = dot(rasToP,sampleCoordinate);
 
-        #define S(point) textureSampleDenormalized(volumeTextureUnit, point)
+        #define S(point) textureSampleDenormalized%(textureUnit)s(volumeTextureUnit, point)
 
         // read from 3D texture
         sample = S(stpPoint);
@@ -502,6 +517,8 @@ class VolumeTexture(FieldSampler):
         float s0N0 = S(stpPoint - vec3(0,%(mmToT)f * gradientSize,0));
         float s00P = S(stpPoint + vec3(0,0,%(mmToP)f * gradientSize));
         float s00N = S(stpPoint - vec3(0,0,%(mmToP)f * gradientSize));
+
+        #undef S
 
         // TODO: add Sobel option to filter gradient
         // https://en.wikipedia.org/wiki/Sobel_operator#Extension_to_other_dimensions
@@ -546,10 +563,11 @@ class SceneRenderer(object):
     self.imageViewer.SetColorLevel(128)
     self.imageViewer.SetColorWindow(256)
 
-    # TODO: this is just an example
-    self.transformPointSource = ""
-    self.volumeTexture = None
+    self.transformPointSource = "" ;# TODO: this is just an example
     self.volumePropertyNode = None
+
+    # map of node IDs to instances of FieldSampler subclasses
+    self.fieldSamplersByNodeID = {}
 
     if scene:
       self.scene = scene
@@ -580,33 +598,117 @@ class SceneRenderer(object):
     # TODO: for testing
     self.volumeTexture = Fiducials(self.shaderComputation, 15, volumeNode)
 
+    self.updateFieldSamplers()
+
   def onVolumeAdded(self):
     # TODO: make one VolumeTexture per volumeNode
-    volumeNode = slicer.util.getNode('vtkMRMLScalarVolumeNode*')
-    self.volumeTexture = VolumeTexture(self.shaderComputation, 15, volumeNode)
+    #volumeNode = slicer.util.getNode('vtkMRMLScalarVolumeNode*')
+    #self.volumeTexture = VolumeTexture(self.shaderComputation, 15, volumeNode)
+    self.updateFieldSamplers()
 
   def onVolumeRemoved(self):
-    # TODO: remove volume
-    pass
+    self.updateFieldSamplers()
+
+  def updateAllocatedTextureUnits(self):
+    self.allocatedTextureUnits = []
+    for fieldSamplers in self.fieldSamplersByNodeID.values():
+      self.allocatedTextureUnits.append(fieldSamplers.textureUnit)
+
+  def getFreeTextureUnit(self):
+    for unit in range(48):
+      if not unit in self.allocatedTextureUnits:
+        self.allocatedTextureUnits.append(unit)
+        return unit
+    logging.error('no texture units available')
+    return -1
+
+  def updateFieldSamplers(self):
+    """For now, hard code the mapping from nodes to FieldSampler, but eventually
+    consider making plugins that handle various node types"""
+    self.updateAllocatedTextureUnits()
+    mappedNodeIDs = []
+    slicer.mrmlScene.InitTraversal()
+    node = slicer.mrmlScene.GetNextNode()
+    while node:
+      id_ = node.GetID()
+      if id_ in self.fieldSamplersByNodeID.keys():
+        mappedNodeIDs.append(id_)
+      else:
+        if node.GetClassName() == 'vtkMRMLScalarVolumeNode':
+          textureUnit = self.getFreeTextureUnit()
+          self.fieldSamplersByNodeID[id_] = VolumeTexture(self.shaderComputation, textureUnit, node)
+          mappedNodeIDs.append(id_)
+          print(id_, 'mapped as', textureUnit)
+        elif node.GetClassName() == 'vtkMRMLMarkupsFiducialNode':
+          textureUnit = self.getFreeTextureUnit()
+          self.fieldSamplersByNodeID[id_] = Fiducials(self.shaderComputation, textureUnit, node)
+          mappedNodeIDs.append(id_)
+          print(id_, 'mapped as', textureUnit)
+      node = slicer.mrmlScene.GetNextNode()
+
+    if id_ in self.fieldSamplersByNodeID.keys():
+      if not id_ in mappedNodeIDs:
+        del(self.fieldSamplersByNodeID[id_])
+        print(id_, 'removed')
+
+  def fieldSamplersSource(self):
+    """Functions to sample all currently mapped nodes"""
+    samplersSource = ''
+    for fieldSampler in self.fieldSamplersByNodeID.values():
+      samplersSource += fieldSampler.fieldSampleSource()
+    return samplersSource
+
+  def fieldCompositeSource(self):
+    """Inner loop to composite all currently mapped nodes (used in ray casting)"""
+
+    fieldSampleTemplate = """
+          sampleVolume0(volumeTextureUnit, samplePoint, gradientSize, sample, normal, gradientMagnitude);
+
+          transferFunction(sample, gradientMagnitude, color, opacity);
+
+          litColor = lightingModel(samplePoint, normal, color, eyeRayOrigin);
+    """
+
+    fieldCompositeSource =  """
+          vec3 normal;
+          float gradientMagnitude;
+          vec3 color;
+          float opacity;
+          vec3 litColor;
+
+          sampleVolume0(volumeTextureUnit, samplePoint, gradientSize, sample, normal, gradientMagnitude);
+
+          transferFunction(sample, gradientMagnitude, color, opacity);
+
+          litColor = lightingModel(samplePoint, normal, color, eyeRayOrigin);
+    """
+    return fieldCompositeSource
+
+
 
   def render(self):
+    """Perform the actual render operation by pulling together all
+    the elements of the shader program and ensuring the data is up to
+    date on the GPU.  Compute the result and display in a window."""
 
     # TODO: this should come from the scenario node or something similar
     self.volumePropertyNode = slicer.util.getNode('ShaderVolumeProperty')
-
-    if not self.volumeTexture or not self.volumePropertyNode:
-      logging.error ("can't render without volume")
-      return
 
     if not self.shaderComputation:
       logging.error("can't render without computation context")
       return
 
-    self.volumeTexture.updateFromMRML()
+    if len(self.fieldSamplersByNodeID.values()) == 0 or not self.volumePropertyNode:
+      logging.error ("can't render without fields")
+      return
+
+    for fieldSampler in self.fieldSamplersByNodeID.values():
+      fieldSampler.updateFromMRML()
 
     rayCastParameters = self.logic.rayCastVolumeParameters(self.volumeTexture.node)
     rayCastParameters.update({
           'rayMaxSteps' : 100000,
+          'compositeSource' : self.fieldCompositeSource()
     })
     rayCastSource = self.logic.rayCastFragmentSource() % rayCastParameters
 
@@ -614,7 +716,7 @@ class SceneRenderer(object):
       %(header)s
       %(intersectBox)s
       %(transformPoint)s
-      %(sampleVolume)s
+      %(fieldSamplers)s
       %(transferFunction)s
       %(rayCast)s
 
@@ -628,7 +730,7 @@ class SceneRenderer(object):
       'header' : self.logic.headerSource(),
       'intersectBox' : self.logic.intersectBoxSource(),
       'transformPoint' : self.transformPointSource,
-      'sampleVolume' : self.volumeTexture.fieldSampleSource(),
+      'fieldSamplers' : self.fieldSamplersSource(),
       'textureUnit' : self.volumeTexture.textureUnit,
       'transferFunction' : self.logic.transferFunctionSource(self.volumePropertyNode),
       'rayCast' : rayCastSource,
@@ -645,8 +747,8 @@ class SceneRenderer(object):
 
     self.renderPending = False
 
-    if False:
-      print(self.shaderComputation.GetFragmentShaderSource())
+    if True:
+      # print(self.shaderComputation.GetFragmentShaderSource())
       fp = open('/tmp/shader.glsl','w')
       fp.write(self.shaderComputation.GetFragmentShaderSource())
       fp.close()
@@ -752,6 +854,7 @@ class ShaderComputationLogic(ScriptedLoadableModuleLogic):
       else {
         color = %(lastColor)s;
       }
+
     """ % {'lastColor': colors[size-1]}
     source += """
     }
@@ -829,6 +932,35 @@ class ShaderComputationLogic(ScriptedLoadableModuleLogic):
 
   def rayCastFragmentSource(self):
     return("""
+      vec3 lightingModel( in vec3 samplePoint, in vec3 normal, in vec3 color, in vec3 eyeRayOrigin )
+      {
+        // Phong lighting
+        // http://en.wikipedia.org/wiki/Phong_reflection_model
+        vec3 Cambient = color;
+        vec3 Cdiffuse = color;
+        vec3 Cspecular = vec3(1.,1.,1.);
+        float Kambient = .30;
+        float Kdiffuse = .95;
+        float Kspecular = .90;
+        float Shininess = 15.;
+        vec3 pointLight = vec3(200., 2500., 1000.); // TODO - lighting model
+
+        vec3 litColor = Kambient * Cambient;
+        vec3 pointToEye = normalize(eyeRayOrigin - samplePoint);
+
+        if (dot(pointToEye, normal) > 0.) {
+          vec3 pointToLight = normalize(pointLight - samplePoint);
+          float lightDot = dot(pointToLight,normal);
+          vec3 lightReflection = reflect(pointToLight,normal);
+          float reflectDot = dot(lightReflection,pointToEye);
+          if (lightDot > 0.) {
+            litColor += Kdiffuse * lightDot * Cdiffuse;
+            litColor += Kspecular * pow( reflectDot, Shininess ) * Cspecular;
+          }
+        }
+        return litColor;
+      }
+
       // field ray caster - starts from the front and collects color and opacity
       // contributions until fully saturated.
       // Sample coordinate is 0->1 texture space
@@ -850,7 +982,6 @@ class ShaderComputationLogic(ScriptedLoadableModuleLogic):
                                       + ( %(halfSinViewAngle)s * normalizedCoordinate.y * vec3( %(viewUp)s    ) ) );
 
 
-        vec3 pointLight = vec3(200., 2500., 1000.); // TODO - lighting model
 
         // find intersection with box, possibly terminate early
         float tNear, tFar;
@@ -873,51 +1004,11 @@ class ShaderComputationLogic(ScriptedLoadableModuleLogic):
 
           vec3 samplePoint = eyeRayOrigin + eyeRayDirection * tCurrent;
 
-          // TODO: transform should be associated with the sampling, not the ray point
-          //       so that gradient is calculated incorporating transform
-          samplePoint = transformPoint(samplePoint);
-
-          vec3 normal;
-          float gradientMagnitude;
-          sampleVolume(volumeTextureUnit, samplePoint, gradientSize, sample, normal, gradientMagnitude);
-          vec3 color;
-          float opacity;
-          transferFunction(sample, gradientMagnitude, color, opacity);
-          opacity *= %(sampleStep)f;
-
-          // Phong lighting
-          // http://en.wikipedia.org/wiki/Phong_reflection_model
-          //vec3 Cdiffuse = vec3(1.,1.,0.);
-          if (samplePoint.x > 0.) {
-            color = vec3(1,1,0);
-          }
-          if (samplePoint.z > 0.) {
-            color += vec3(0,0,1);
-          }
-          vec3 Cambient = color;
-          vec3 Cdiffuse = color;
-          vec3 Cspecular = vec3(1.,1.,1.);
-          float Kambient = .30;
-          float Kdiffuse = .95;
-          float Kspecular = .90;
-          float Shininess = 15.;
-
-          vec3 phongColor = Kambient * Cambient;
-          vec3 pointToEye = normalize(eyeRayOrigin - samplePoint);
-
-          if (dot(pointToEye, normal) > 0.) {
-            vec3 pointToLight = normalize(pointLight - samplePoint);
-            float lightDot = dot(pointToLight,normal);
-            vec3 lightReflection = reflect(pointToLight,normal);
-            float reflectDot = dot(lightReflection,pointToEye);
-            if (lightDot > 0.) {
-              phongColor += Kdiffuse * lightDot * Cdiffuse;
-              phongColor += Kspecular * pow( reflectDot, Shininess ) * Cspecular;
-            }
-          }
+          %(compositeSource)s
 
           // http://graphicsrunner.blogspot.com/2009/01/volume-rendering-101.html
-          integratedPixel.rgb += (1. - integratedPixel.a) * opacity * phongColor;
+          opacity *= %(sampleStep)f;
+          integratedPixel.rgb += (1. - integratedPixel.a) * opacity * litColor;
           integratedPixel.a += (1. - integratedPixel.a) * opacity;
           integratedPixel = clamp(integratedPixel, 0., 1.);
 

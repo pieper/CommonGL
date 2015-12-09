@@ -211,13 +211,13 @@ class SceneObserver(VTKObservationMixin):
     node = calldata
     if not self.hasObserver(node, vtk.vtkCommand.AnyEvent, self._onNodeModified):
       self._observeNode(node)
-    self._trigger(node.GetClassName(), "AddedEvent")
+    self._trigger(node.GetClassName(), "NodeAddedEvent")
 
   @vtk.calldata_type(vtk.VTK_OBJECT)
   def onNodeRemoved(self, caller, event, calldata):
     node = calldata
     self.removeObserver(node, vtk.vtkCommand.AnyEvent, self._onNodeModified)
-    self._trigger(node.GetClassName(), "RemovedEvent")
+    self._trigger(node.GetClassName(), "NodeRemovedEvent")
 
   def _trigger(self, className, eventName):
     key = (className,eventName)
@@ -317,7 +317,7 @@ class Fiducials(FieldSampler):
         centerToSample = samplePoint-vec3( %(fiducialString)s );
         distance = length(centerToSample);
         if (distance < glow * %(radius)s) {
-            sample += 100. * smoothstep(distance / glow, distance * glow, distance);
+            sample += 1000. * smoothstep(distance / glow, distance * glow, distance);
             normal += normalize(centerToSample);
             gradientMagnitude += distance;
         }
@@ -574,13 +574,14 @@ class SceneRenderer(object):
     else:
       self.scene = slicer.mrmlScene
     self.sceneObserver = SceneObserver(self.scene)
+    self.sceneObserver.addTrigger("ScalarVolume", "Added", self.onVolumeAdded)
     self.sceneObserver.addTrigger("ScalarVolume", "Removed", self.onVolumeRemoved)
     self.sceneObserver.addTrigger("ScalarVolume", "Modified", self.requestRender)
     self.sceneObserver.addTrigger("ScalarVolume", "ImageDataModified", self.requestRender)
     self.sceneObserver.addTrigger("LabelMapVolume", "Modified", self.requestRender)
     self.sceneObserver.addTrigger("LabelMapVolume", "ImageDataModified", self.requestRender)
     self.sceneObserver.addTrigger("Camera", "Modified", self.requestRender)
-    self.sceneObserver.addTrigger("Transform", "Modified", self.requestRender)
+    self.sceneObserver.addTrigger("LinearTransform", "Modified", self.requestRender)
     self.sceneObserver.addTrigger("VolumeProperty", "Modified", self.requestRender)
     self.sceneObserver.addTrigger("MarkupsFiducial", "Modified", self.requestRender)
     self.renderPending = False
@@ -594,9 +595,6 @@ class SceneRenderer(object):
 
   def setVolume(self, volumeNode):
     self.volumeTexture = VolumeTexture(self.shaderComputation, 15, volumeNode)
-
-    # TODO: for testing
-    self.volumeTexture = Fiducials(self.shaderComputation, 15, volumeNode)
 
     self.updateFieldSamplers()
 
@@ -638,15 +636,15 @@ class SceneRenderer(object):
           textureUnit = self.getFreeTextureUnit()
           self.fieldSamplersByNodeID[id_] = VolumeTexture(self.shaderComputation, textureUnit, node)
           mappedNodeIDs.append(id_)
-          print(id_, 'mapped as', textureUnit)
+          print(id_, node.GetName(), 'mapped as', textureUnit)
         elif node.GetClassName() == 'vtkMRMLMarkupsFiducialNode':
           textureUnit = self.getFreeTextureUnit()
           self.fieldSamplersByNodeID[id_] = Fiducials(self.shaderComputation, textureUnit, node)
           mappedNodeIDs.append(id_)
-          print(id_, 'mapped as', textureUnit)
+          print(id_, node.GetName(), 'mapped as', textureUnit)
       node = slicer.mrmlScene.GetNextNode()
 
-    if id_ in self.fieldSamplersByNodeID.keys():
+    for id_ in self.fieldSamplersByNodeID.keys():
       if not id_ in mappedNodeIDs:
         del(self.fieldSamplersByNodeID[id_])
         print(id_, 'removed')
@@ -663,7 +661,7 @@ class SceneRenderer(object):
 
     fieldSampleTemplate = """
           // accumulate per-field opacities and lit colors
-          sampleVolume%(textureUnit)s(volumeTextureUnit, samplePoint, gradientSize, sample, normal, gradientMagnitude);
+          sampleVolume%(textureUnit)s(textureUnit%(textureUnit)s, samplePoint, gradientSize, sample, normal, gradientMagnitude);
 
           transferFunction(sample, gradientMagnitude, color, fieldOpacity);
 
@@ -719,6 +717,14 @@ class SceneRenderer(object):
     for fieldSampler in self.fieldSamplersByNodeID.values():
       fieldSampler.updateFromMRML()
 
+    # need to declare each texture unit as a uniform passed in
+    # from the host code; these are done in the vtkOpenGLTextureImage instances
+    textureUnitDeclaration = "uniform sampler3D "
+    for fieldSampler in self.fieldSamplersByNodeID.values():
+      textureUnitDeclaration += "textureUnit%d," % fieldSampler.textureUnit
+    textureUnitDeclaration = textureUnitDeclaration[:-1] + ';'
+
+
     rayCastParameters = self.logic.rayCastVolumeParameters(self.volumeTexture.node)
     rayCastParameters.update({
           'rayMaxSteps' : 100000,
@@ -728,6 +734,7 @@ class SceneRenderer(object):
 
     self.shaderComputation.SetFragmentShaderSource("""
       %(header)s
+      %(textureUnitDeclaration)s
       %(intersectBox)s
       %(transformPoint)s
       %(fieldSamplers)s
@@ -735,17 +742,16 @@ class SceneRenderer(object):
       %(rayCast)s
 
       varying vec3 interpolatedTextureCoordinate;
-      uniform sampler3D textureUnit%(textureUnit)s;
       void main()
       {
-        gl_FragColor = rayCast(interpolatedTextureCoordinate, textureUnit%(textureUnit)s);
+        gl_FragColor = rayCast(interpolatedTextureCoordinate);
       }
     """ % {
       'header' : self.logic.headerSource(),
+      'textureUnitDeclaration' : textureUnitDeclaration,
       'intersectBox' : self.logic.intersectBoxSource(),
       'transformPoint' : self.transformPointSource,
       'fieldSamplers' : self.fieldSamplersSource(),
-      'textureUnit' : self.volumeTexture.textureUnit,
       'transferFunction' : self.logic.transferFunctionSource(self.volumePropertyNode),
       'rayCast' : rayCastSource,
     })
@@ -761,7 +767,7 @@ class SceneRenderer(object):
 
     self.renderPending = False
 
-    if True:
+    if False:
       # print(self.shaderComputation.GetFragmentShaderSource())
       fp = open('/tmp/shader.glsl','w')
       fp.write(self.shaderComputation.GetFragmentShaderSource())
@@ -978,7 +984,7 @@ class ShaderComputationLogic(ScriptedLoadableModuleLogic):
       // field ray caster - starts from the front and collects color and opacity
       // contributions until fully saturated.
       // Sample coordinate is 0->1 texture space
-      vec4 rayCast( in vec3 sampleCoordinate, in sampler3D volumeTextureUnit )
+      vec4 rayCast( in vec3 sampleCoordinate )
       {
         vec4 backgroundRGBA = vec4(0.,0.,.5,1.); // TODO: mid blue background for now
 

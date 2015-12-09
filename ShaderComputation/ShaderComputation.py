@@ -317,12 +317,9 @@ class Fiducials(FieldSampler):
         centerToSample = samplePoint-vec3( %(fiducialString)s );
         distance = length(centerToSample);
         if (distance < glow * %(radius)s) {
-            sample = 1000.; // TODO could be variable
-            sample *= smoothstep(distance / glow, distance * glow, distance);
-
-            normal = normalize(centerToSample);
-            gradientMagnitude = distance;
-            return;
+            sample += 100. * smoothstep(distance / glow, distance * glow, distance);
+            normal += normalize(centerToSample);
+            gradientMagnitude += distance;
         }
     """
 
@@ -349,14 +346,17 @@ class Fiducials(FieldSampler):
 
         vec3 centerToSample;
         float distance;
-        float glow = 2.2;
-
-        %(fiducialSampleSource)s
+        float glow = 1.2;
 
         // default if sample is not in fiducial
         sample = 0.;
-        normal = vec3(1,0,0);
+        normal = vec3(0,0,0);
         gradientMagnitude = 1.;
+
+        %(fiducialSampleSource)s
+
+        normal = normalize(normal);
+
       }
     """ % {
         'fiducialSampleSource' : fiducialSampleSource,
@@ -662,26 +662,40 @@ class SceneRenderer(object):
     """Inner loop to composite all currently mapped nodes (used in ray casting)"""
 
     fieldSampleTemplate = """
-          sampleVolume0(volumeTextureUnit, samplePoint, gradientSize, sample, normal, gradientMagnitude);
+          // accumulate per-field opacities and lit colors
+          sampleVolume%(textureUnit)s(volumeTextureUnit, samplePoint, gradientSize, sample, normal, gradientMagnitude);
 
-          transferFunction(sample, gradientMagnitude, color, opacity);
+          transferFunction(sample, gradientMagnitude, color, fieldOpacity);
 
-          litColor = lightingModel(samplePoint, normal, color, eyeRayOrigin);
+          litColor += fieldOpacity * lightingModel(samplePoint, normal, color, eyeRayOrigin);
+          opacity += fieldOpacity;
+    """
+
+    fieldCombineTemplate = """
+          // combine 
+          litColor += opacity%(textureUnit)s/opacity * litColor%(textureUnit)s;
     """
 
     fieldCompositeSource =  """
           vec3 normal;
           float gradientMagnitude;
           vec3 color;
-          float opacity;
-          vec3 litColor;
-
-          sampleVolume0(volumeTextureUnit, samplePoint, gradientSize, sample, normal, gradientMagnitude);
-
-          transferFunction(sample, gradientMagnitude, color, opacity);
-
-          litColor = lightingModel(samplePoint, normal, color, eyeRayOrigin);
+          float opacity = 0.;
+          vec3 litColor = vec3(0.);
+          float fieldOpacity = 0.;
+          vec3 fieldLitColor = vec3(0.);
     """
+
+    for fieldSampler in self.fieldSamplersByNodeID.values():
+      fieldCompositeSource += fieldSampleTemplate % {
+              'textureUnit' : fieldSampler.textureUnit
+      }
+
+    fieldCompositeSource +=  """
+        // normalize back so that litColor is mean of all fields weighted by opacity
+        litColor /= opacity;
+    """
+
     return fieldCompositeSource
 
 

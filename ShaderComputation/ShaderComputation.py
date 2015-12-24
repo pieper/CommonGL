@@ -555,7 +555,8 @@ class SceneRenderer(object):
     self.shaderComputation.SetVertexShaderSource(self.logic.rayCastVertexShaderSource())
 
     self.resultImage = vtk.vtkImageData()
-    self.resultImage.SetDimensions(1024, 1024, 1)
+    #self.resultImage.SetDimensions(1024, 1024, 1)
+    self.resultImage.SetDimensions(512, 512, 1)
     self.resultImage.AllocateScalars(vtk.VTK_UNSIGNED_CHAR, 4)
     self.shaderComputation.SetResultImageData(self.resultImage)
 
@@ -1121,8 +1122,8 @@ class ShaderComputationTest(ScriptedLoadableModuleTest):
     there is a volume and set the instance variable"""
     import SampleData
     sampleDataLogic = SampleData.SampleDataLogic()
-    name, method = 'MRHead', sampleDataLogic.downloadMRHead
     name, method = 'CTACardio', sampleDataLogic.downloadCTACardio
+    name, method = 'MRHead', sampleDataLogic.downloadMRHead
     volumeToRender = slicer.util.getNode(name)
     if not volumeToRender:
       logging.info("Getting Volume %s" % name)
@@ -1132,6 +1133,7 @@ class ShaderComputationTest(ScriptedLoadableModuleTest):
     shaderFiducials = slicer.util.getNode('shaderFiducials')
     if not shaderFiducials:
       displayNode = slicer.vtkMRMLMarkupsDisplayNode()
+      displayNode.SetGlyphScale(30)
       slicer.mrmlScene.AddNode(displayNode)
       fiducialNode = slicer.vtkMRMLMarkupsFiducialNode()
       fiducialNode.SetName('shaderFiducials')
@@ -1140,7 +1142,7 @@ class ShaderComputationTest(ScriptedLoadableModuleTest):
       for ras in ((28.338526, 34.064367, 10), (-10, 0, -5)):
         fiducialNode.AddFiducial(*ras)
       import random
-      fiducialCount = 10
+      fiducialCount = 5
       radius = 75
       for index in range(fiducialCount):
         uvw = [random.random(), random.random(), random.random()]

@@ -538,6 +538,90 @@ class VolumeTexture(FieldSampler):
     """ % sampleVolumeParameters
     return fieldSampleSource
 
+class LabelMapTexture(VolumeTexture):
+  """Most of the functionality is inherited, but a special sampler is used"""
+
+  def __init__(self):
+    FieldSampler.__init__(self, shaderComputation, textureUnit, volumeNode)
+    self.textureImage.SetInterpolate(0)
+
+  def fieldSampleSource(self):
+    """Return the GLSL code to sample our volume in space
+    Function names are postpended with texure unit number to avoid name clashes.
+    """
+
+    # TODO:
+    # - set neighbors to zero/one depending of they are equal to sample value for gradient
+    # - refactor VolumeTexture so we don't repeat here
+    # - make a transfer function for color table
+    # TODO: need a transfer function per-field
+    # TODO: need a procedural blend option (cvg-style)
+    # TODO: need gradient opacity / 2D lookup table
+    # TODO: need auto-transfer function generation
+    # TODO: calculate ras bounds for all objects
+    sampleVolumeParameters = self.sampleVolumeParameters()
+    sampleVolumeParameters.update({
+          'sampleUnshift' : self.sampleUnshift,
+          'sampleUnscale' : self.sampleUnscale,
+          'textureUnit' : self.textureUnit,
+    })
+    fieldSampleSource = """
+      float textureSampleDenormalized%(textureUnit)s(const in sampler3D volumeTextureUnit, const in vec3 stpPoint) {
+        return ( texture3D(volumeTextureUnit, stpPoint).r * %(sampleUnscale)f + %(sampleUnshift)f );
+      }
+
+      void sampleVolume%(textureUnit)s(const in sampler3D volumeTextureUnit, const in vec3 samplePointIn, const in float gradientSize,
+                        out float sample, out vec3 normal, out float gradientMagnitude)
+      {
+
+        // TODO: transform should be applied to each sample in the gradient estimation
+        //       so that gradient is calculated incorporating transform.
+        vec3 samplePoint = transformPoint(samplePointIn);
+
+        // vectors to map RAS to stp
+        vec4 rasToS =  vec4( %(rasToS)s );
+        vec4 rasToT =  vec4( %(rasToT)s );
+        vec4 rasToP =  vec4( %(rasToP)s );
+
+        vec3 stpPoint;
+        vec4 sampleCoordinate = vec4(samplePoint, 1.);
+        stpPoint.s = dot(rasToS,sampleCoordinate);
+        stpPoint.t = dot(rasToT,sampleCoordinate);
+        stpPoint.p = dot(rasToP,sampleCoordinate);
+
+        #define S(point) textureSampleDenormalized%(textureUnit)s(volumeTextureUnit, point)
+
+        // read from 3D texture
+        sample = S(stpPoint);
+
+        // central difference sample gradient (P is +1, N is -1)
+        float sP00 = S(stpPoint + vec3(%(mmToS)f * gradientSize,0,0));
+        float sN00 = S(stpPoint - vec3(%(mmToS)f * gradientSize,0,0));
+        float s0P0 = S(stpPoint + vec3(0,%(mmToT)f * gradientSize,0));
+        float s0N0 = S(stpPoint - vec3(0,%(mmToT)f * gradientSize,0));
+        float s00P = S(stpPoint + vec3(0,0,%(mmToP)f * gradientSize));
+        float s00N = S(stpPoint - vec3(0,0,%(mmToP)f * gradientSize));
+
+        #undef S
+
+        // TODO: add Sobel option to filter gradient
+        // https://en.wikipedia.org/wiki/Sobel_operator#Extension_to_other_dimensions
+
+        vec3 gradient = vec3( (sP00-sN00),
+                              (s0P0-s0N0),
+                              (s00P-s00N) );
+
+        gradientMagnitude = length(gradient);
+
+        // https://en.wikipedia.org/wiki/Normal_(geometry)#Transforming_normals
+        mat3 normalSTPToRAS = mat3(%(normalSTPToRAS)s);
+        vec3 localNormal;
+        localNormal = (-1. / gradientMagnitude) * gradient;
+        normal = normalize(normalSTPToRAS * localNormal);
+      }
+    """ % sampleVolumeParameters
+    return fieldSampleSource
+
 class SceneRenderer(object):
   """A class to render the current mrml scene as using shader computation"""
 
@@ -638,6 +722,11 @@ class SceneRenderer(object):
           self.fieldSamplersByNodeID[id_] = VolumeTexture(self.shaderComputation, textureUnit, node)
           mappedNodeIDs.append(id_)
           print(id_, node.GetName(), 'mapped as', textureUnit)
+        if node.GetClassName() == 'vtkMRMLLabelMapVolumeNode':
+          textureUnit = self.getFreeTextureUnit()
+          self.fieldSamplersByNodeID[id_] = LabelMapTexture(self.shaderComputation, textureUnit, node)
+          mappedNodeIDs.append(id_)
+          print(id_, node.GetName(), 'mapped as', textureUnit)
         elif node.GetClassName() == 'vtkMRMLMarkupsFiducialNode':
           textureUnit = self.getFreeTextureUnit()
           self.fieldSamplersByNodeID[id_] = Fiducials(self.shaderComputation, textureUnit, node)
@@ -711,7 +800,13 @@ class SceneRenderer(object):
       logging.error("can't render without computation context")
       return
 
-    if len(self.fieldSamplersByNodeID.values()) == 0 or not self.volumePropertyNode:
+    if not self.volumePropertyNode:
+      logging.error ("no volume property node")
+      return
+
+    self.updateFieldSamplers()
+
+    if len(self.fieldSamplersByNodeID.values()) == 0:
       logging.error ("can't render without fields")
       return
 

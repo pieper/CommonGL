@@ -654,6 +654,12 @@ class VolumeTexture(FieldSampler):
         stpPoint.t = dot(rasToT,sampleCoordinate);
         stpPoint.p = dot(rasToP,sampleCoordinate);
 
+        if (any(lessThan(stpPoint, vec3(0))) || any(greaterThan(stpPoint,vec3(1)))) {
+            sample = 0;
+            gradientMagnitude = 0;
+            return;
+        }
+
         #define S(point) textureSampleDenormalized%(textureUnit)s(volumeTextureUnit, point)
 
         // read from 3D texture
@@ -1292,12 +1298,15 @@ class ShaderComputationTest(ScriptedLoadableModuleTest):
     if not volumeToRender:
       logging.info("Getting Volume %s" % name)
       volumeToRender = method()
+    self.volumeDisplayNode(volumeToRender, (1,1,1))
 
   def amigoMRUSData(self):
+    preopT2orig = 'https://docs.google.com/uc?authuser=1&id=0Bygzw56l1ZC-Q0dCLThIelVVaFE&export=download'
+    preopT2smooth = 'https://docs.google.com/uc?authuser=1&id=0Bygzw56l1ZC-Q0dCLThIelVVaFE&export=download'
     source = ( 'MR-US Neuro',
               ('https://docs.google.com/uc?authuser=1&id=0Bygzw56l1ZC-MFp5RGZMSmF4YVk&export=download',
                'https://docs.google.com/uc?authuser=1&id=0Bygzw56l1ZC-UmhGUk51NXdpZ3M&export=download',
-               'https://docs.google.com/uc?authuser=1&id=0Bygzw56l1ZC-YnpNSUliQnVRcFE&export=download',
+               preopT2smooth,
                'https://docs.google.com/uc?authuser=1&id=0Bygzw56l1ZC-MGVUX2QyRllPcW8&export=download'
               ),
               ('intra-T2.nrrd', 'intra-US.nrrd', 'preop-T2.nrrd', 'preop-US.nrrd'),
@@ -1307,11 +1316,13 @@ class ShaderComputationTest(ScriptedLoadableModuleTest):
     SampleData.SampleDataLogic().downloadFromSource(SampleData.SampleDataSource(*source))
 
   def amigoMRUSPreIntraData(self):
+    preopT2orig = 'https://docs.google.com/uc?authuser=1&id=0Bygzw56l1ZC-Q0dCLThIelVVaFE&export=download'
+    preopT2smooth = 'https://docs.google.com/uc?authuser=1&id=0Bygzw56l1ZC-Q0dCLThIelVVaFE&export=download'
     source = ( 'MR-US Neuro PreIntra',
               ('https://docs.google.com/uc?authuser=1&id=0Bygzw56l1ZC-UmhGUk51NXdpZ3M&export=download',
-               'https://docs.google.com/uc?authuser=1&id=0Bygzw56l1ZC-YnpNSUliQnVRcFE&export=download'
+               preopT2smooth
               ),
-              ('intra-US.nrrd', 'preop-T2.nrrd'),
+              ('intra-US.nrrd', 'preop-T2-smooth.nrrd'),
               ('intra-US','preop-T2')
             )
     import SampleData
@@ -1365,8 +1376,8 @@ class ShaderComputationTest(ScriptedLoadableModuleTest):
     """Load MR and US data to emulate intraprocedural imaging"""
     # self.amigoMRUSData()
     nodes = self.amigoMRUSPreIntraData()
-    self.volumeDisplayNode(nodes[0], (1,0,1))
-    self.volumeDisplayNode(nodes[1], (0,1,0))
+    self.volumeDisplayNode(nodes[0], (0,1,0))
+    self.volumeDisplayNode(nodes[1], (1,1,1))
 
   def addFiducials(self):
     shaderFiducials = slicer.util.getNode('shaderFiducials')
@@ -1404,11 +1415,12 @@ class ShaderComputationTest(ScriptedLoadableModuleTest):
     your test should break so they know that the feature is needed.
     """
 
+    self.addDefaultVolumeProperty()
+    scenario = 'chest'
     scenario = 'amigo'
     if scenario == 'amigo':
       self.amigoScenario()
     else:
-      self.addDefaultVolumeProperty()
       self.addFiducials()
       self.addVolume()
 

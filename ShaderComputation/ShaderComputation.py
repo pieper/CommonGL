@@ -311,7 +311,7 @@ class Fiducials(FieldSampler):
     the passed volumePropertyNode.
     """
     source = """
-    void transferFunction%(textureUnit)s(const in float sample, const in float gradientMagnitude /* TODO: not used */,
+    void transferFunction%(textureUnit)s(const in float sample, const in float gradientMagnitude,
                           out vec3 color, out float opacity)
     {
        color = vec3(1,0,0);
@@ -325,9 +325,7 @@ class Fiducials(FieldSampler):
 
     transferFunctionSource = self.transferFunctionSource()
 
-    shaderFiducials = slicer.util.getNode('shaderFiducials')
-    if not shaderFiducials:
-      logger.error('no fiducials')
+    shaderFiducials = self.node
 
     # each fiducial is checked and if inside, returns sample
     fiducialSampleTemplate = """
@@ -336,7 +334,6 @@ class Fiducials(FieldSampler):
         if (distance < glow * %(radius)s) {
             sample += smoothstep(distance / glow, distance * glow, distance);
             normal += normalize(centerToSample);
-            gradientMagnitude += distance;
         }
     """
 
@@ -501,47 +498,87 @@ class VolumeTexture(FieldSampler):
       if displayNode.GetClassName() == 'vtkMRMLGPURayCastVolumeRenderingDisplayNode':
         volumePropertyNode = displayNode.GetVolumePropertyNode()
 
-    scalarOpacity = volumePropertyNode.GetScalarOpacity(0)
+    scalarOpacityFunction = volumePropertyNode.GetScalarOpacity(0)
+    gradientOpacityFunction = volumePropertyNode.GetGradientOpacity(0)
     colorTransfer = volumePropertyNode.GetColor(0)
 
     source = """
-    void transferFunction%(textureUnit)s(const in float sample, const in float gradientMagnitude /* TODO: not used */,
+    void transferFunction%(textureUnit)s(const in float sample, const in float gradientMagnitude,
                           out vec3 color, out float opacity)
     {
+      float scalarOpacity = 0., gradientOpacity = 0.;
+
     """ % { 'textureUnit' : self.textureUnit }
 
     # convert the scalarOpacity transfer function to a procedure
     # - ignore the interpolation options; only linear interpolation
     intensities = []
-    opacities = []
-    size = scalarOpacity.GetSize()
+    scalarOpacities = []
+    size = scalarOpacityFunction.GetSize()
     values = [0,]*4
     for index in range(size):
-      scalarOpacity.GetNodeValue(index, values)
+      scalarOpacityFunction.GetNodeValue(index, values)
       intensities.append(values[0])
-      opacities.append(values[1])
+      scalarOpacities.append(values[1])
     source += """
       if (sample < %(minIntensity)f) {
-        opacity = %(minOpacity)f;
+        scalarOpacity = %(minOpacity)f;
       }
-    """ % {'minIntensity': intensities[0], 'minOpacity': opacities[0]}
+    """ % {'minIntensity': intensities[0], 'minOpacity': scalarOpacities[0]}
     for index in range(size-1):
       currentIndex = index + 1
       source += """
         else if (sample < %(currentIntesity)f) {
-          opacity = mix(%(lastOpacity)f, %(currentOpacity)f, (sample - %(lastIntensity)f) / %(intensityRange)f);
+          scalarOpacity = mix(%(lastOpacity)f, %(currentOpacity)f, (sample - %(lastIntensity)f) / %(intensityRange)f);
         }
       """ % {'currentIntesity': intensities[currentIndex],
-             'lastOpacity': opacities[index],
-             'currentOpacity': opacities[currentIndex],
+             'lastOpacity': scalarOpacities[index],
+             'currentOpacity': scalarOpacities[currentIndex],
              'lastIntensity': intensities[index],
              'intensityRange': intensities[currentIndex] - intensities[index],
              }
     source += """
       else {
-        opacity = %(lastOpacity)f;
+        scalarOpacity = %(lastOpacity)f;
       }
-    """ % {'lastOpacity': opacities[size-1]}
+    """ % {'lastOpacity': scalarOpacities[size-1]}
+
+    # convert the gradientOpacity transfer function to a procedure
+    # - ignore the interpolation options; only linear interpolation
+    intensities = []
+    gradientOpacities = []
+    size = gradientOpacityFunction.GetSize()
+    values = [0,]*4
+    for index in range(size):
+      gradientOpacityFunction.GetNodeValue(index, values)
+      intensities.append(values[0])
+      gradientOpacities.append(values[1])
+    source += """
+      if (sample < %(minIntensity)f) {
+        gradientOpacity = %(minOpacity)f;
+      }
+    """ % {'minIntensity': intensities[0], 'minOpacity': gradientOpacities[0]}
+    for index in range(size-1):
+      currentIndex = index + 1
+      source += """
+        else if (sample < %(currentIntesity)f) {
+          gradientOpacity = mix(%(lastOpacity)f, %(currentOpacity)f, (sample - %(lastIntensity)f) / %(intensityRange)f);
+        }
+      """ % {'currentIntesity': intensities[currentIndex],
+             'lastOpacity': gradientOpacities[index],
+             'currentOpacity': gradientOpacities[currentIndex],
+             'lastIntensity': intensities[index],
+             'intensityRange': intensities[currentIndex] - intensities[index],
+             }
+    source += """
+      else {
+        gradientOpacity = %(lastOpacity)f;
+      }
+    """ % {'lastOpacity': gradientOpacities[size-1]}
+
+    source += """
+      opacity = scalarOpacity + gradientOpacity;
+    """
 
     # convert the colorTransfer to a procedure
     intensities = []
@@ -685,10 +722,7 @@ class LabelMapTexture(VolumeTexture):
     # - set neighbors to zero/one depending of they are equal to sample value for gradient
     # - refactor VolumeTexture so we don't repeat here
     # - make a transfer function for color table
-    # TODO: need a transfer function per-field
     # TODO: need a procedural blend option (cvg-style)
-    # TODO: need gradient opacity / 2D lookup table
-    # TODO: need auto-transfer function generation
     # TODO: calculate ras bounds for all objects
     sampleVolumeParameters = self.sampleVolumeParameters()
     sampleVolumeParameters.update({
@@ -815,9 +849,6 @@ class SceneRenderer(object):
     self.updateFieldSamplers()
 
   def onVolumeAdded(self):
-    # TODO: make one VolumeTexture per volumeNode
-    #volumeNode = slicer.util.getNode('vtkMRMLScalarVolumeNode*')
-    #self.volumeTexture = VolumeTexture(self.shaderComputation, 15, volumeNode)
     self.updateFieldSamplers()
 
   def onVolumeRemoved(self):
@@ -889,7 +920,6 @@ class SceneRenderer(object):
 
           litColor += fieldOpacity * lightingModel(samplePoint, normal, color, eyeRayOrigin);
           opacity += fieldOpacity;
-          opacity += 0.1 * fieldOpacity /* TODO */ + 0.0001 * gradientMagnitude;
     """
 
     fieldCompositeSource =  """
@@ -920,16 +950,9 @@ class SceneRenderer(object):
     the elements of the shader program and ensuring the data is up to
     date on the GPU.  Compute the result and display in a window."""
 
-    # TODO: this should come from the scenario node or something similar
-    self.volumePropertyNode = slicer.util.getNode('ShaderVolumeProperty')
-
     if not self.shaderComputation:
       logging.error("can't render without computation context")
       return
-
-    if not self.volumePropertyNode:
-      logging.error ("no volume property node")
-      ShaderComputationTest().addDefaultVolumeProperty()
 
     self.updateFieldSamplers()
 

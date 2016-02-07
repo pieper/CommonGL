@@ -864,7 +864,8 @@ class SceneRenderer(object):
     self.sceneObserver.addTrigger("VolumeProperty", "Modified", self.requestRender)
     self.sceneObserver.addTrigger("MarkupsFiducial", "Modified", self.requestRender)
     self.sceneObserver.addTrigger("ScalarVolume", "No", self.requestRender) # sent from transform modified
-    self.renderPending = False
+    self._renderPending = False
+    self._active = True # ignore events when not active
 
   def cleanup(self):
     self.sceneObserver.removeObservers()
@@ -873,9 +874,17 @@ class SceneRenderer(object):
     self.shaderComputation = None
     self.imageViewer = None
 
+  def deactivate(self):
+    self._active = False
+
+  def activate(self):
+    self._active = True
+    self.updateFieldSamplers()
+    self.render()
+
+
   def setVolume(self, volumeNode):
     self.volumeTexture = VolumeTexture(self.shaderComputation, 15, volumeNode)
-
     self.updateFieldSamplers()
 
   def onVolumeAdded(self):
@@ -900,6 +909,8 @@ class SceneRenderer(object):
   def updateFieldSamplers(self):
     """For now, hard code the mapping from nodes to FieldSampler, but eventually
     consider making plugins that handle various node types"""
+    if not self._active:
+      return
     self.updateAllocatedTextureUnits()
     mappedNodeIDs = []
     slicer.mrmlScene.InitTraversal()
@@ -930,7 +941,6 @@ class SceneRenderer(object):
       if not id_ in mappedNodeIDs:
         del(self.fieldSamplersByNodeID[id_])
         print(id_, 'removed')
-
 
   def fieldSamplersSource(self):
     """Functions to sample all currently mapped nodes"""
@@ -979,6 +989,9 @@ class SceneRenderer(object):
     """Perform the actual render operation by pulling together all
     the elements of the shader program and ensuring the data is up to
     date on the GPU.  Compute the result and display in a window."""
+
+    if not self._active:
+      return
 
     if not self.shaderComputation:
       logging.error("can't render without computation context")
@@ -1044,7 +1057,7 @@ class SceneRenderer(object):
     self.imageViewer.SetInputData(self.resultImage)
     self.imageViewer.Render()
 
-    self.renderPending = False
+    self._renderPending = False
 
     if False:
       # print(self.shaderComputation.GetFragmentShaderSource())
@@ -1053,8 +1066,8 @@ class SceneRenderer(object):
       fp.close()
 
   def requestRender(self):
-    if not self.renderPending:
-      self.renderPending = True
+    if not self._renderPending:
+      self._renderPending = True
       qt.QTimer.singleShot(0,self.render)
 
 
@@ -1455,6 +1468,7 @@ class ShaderComputationTest(ScriptedLoadableModuleTest):
     your test should break so they know that the feature is needed.
     """
 
+    slicer.modules.ShaderComputationWidget.sceneRenderer.deactivate()
     self.addDefaultVolumeProperty()
     scenario = 'chest'
     scenario = 'amigo'
@@ -1463,4 +1477,4 @@ class ShaderComputationTest(ScriptedLoadableModuleTest):
     else:
       self.addFiducials()
       self.addVolume()
-
+    slicer.modules.ShaderComputationWidget.sceneRenderer.activate()

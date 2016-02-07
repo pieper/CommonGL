@@ -195,6 +195,12 @@ class SceneObserver(VTKObservationMixin):
     # and eventKey is tested for equality to "{eventKey}Event"
     self._triggers = {}
 
+    # for debugging turn this on
+    # 0: no debugging
+    # 1: print each trigger
+    # 2: print each scene event
+    self.verbose = 0
+
   def __del__(self):
     self.removeObservers()
 
@@ -222,9 +228,13 @@ class SceneObserver(VTKObservationMixin):
     key = (className,eventName)
     if key in self._triggers:
       for callback in self._triggers[key]:
+        if self.verbose > 0:
+          print("callback triggered by %s from %s" % (eventName, className))
         callback()
 
   def _onNodeModified(self,node,eventName):
+    if self.verbose > 1:
+      print("%s from %s" % (eventName, node.GetID()))
     self._trigger(node.GetClassName(), eventName)
 
   def _key(self, nodeKey, eventKey):
@@ -490,14 +500,8 @@ class VolumeTexture(FieldSampler):
     the passed volumePropertyNode.
     """
 
-    # use the per-volume display node if present, otherwise default
-    volumePropertyNode = slicer.util.getNode('ShaderVolumeProperty')
-    displayNodeCount = self.node.GetNumberOfDisplayNodes()
-    for displayNodeIndex in range(displayNodeCount):
-      displayNode = self.node.GetNthDisplayNode(displayNodeIndex)
-      if displayNode.GetClassName() == 'vtkMRMLGPURayCastVolumeRenderingDisplayNode':
-        volumePropertyNode = displayNode.GetVolumePropertyNode()
-
+    displayNode = ShaderComputationLogic().volumeRenderingDisplayNode(self.node)
+    volumePropertyNode = displayNode.GetVolumePropertyNode()
     scalarOpacityFunction = volumePropertyNode.GetScalarOpacity(0)
     gradientOpacityFunction = volumePropertyNode.GetGradientOpacity(0)
     colorTransfer = volumePropertyNode.GetColor(0)
@@ -621,6 +625,25 @@ class VolumeTexture(FieldSampler):
     """Return the GLSL code to sample our volume in space
     Function names are postpended with texure unit number to avoid name clashes.
     """
+
+    displayNode = ShaderComputationLogic().volumeRenderingDisplayNode(self.node)
+    if displayNode.GetVisibility() == 0:
+      return """
+        void transferFunction%(textureUnit)s(
+            const in float sample, const in float gradientMagnitude,
+            out vec3 color, out float opacity) {
+          color = vec3(0);
+          opacity = 0;
+        }
+        void sampleVolume%(textureUnit)s(
+            const in sampler3D volumeTextureUnit,
+            const in vec3 samplePointIn, const in float gradientSize,
+            out float sample, out vec3 normal, out float gradientMagnitude) {
+          sample = 0;
+          normal = vec3(0,0,0);
+          gradientMagnitude = 0;
+      }
+      """ % { 'textureUnit': self.textureUnit }
 
     transferFunctionSource = self.transferFunctionSource()
 
@@ -840,6 +863,7 @@ class SceneRenderer(object):
     self.sceneObserver.addTrigger("LinearTransform", "Modified", self.requestRender)
     self.sceneObserver.addTrigger("VolumeProperty", "Modified", self.requestRender)
     self.sceneObserver.addTrigger("MarkupsFiducial", "Modified", self.requestRender)
+    self.sceneObserver.addTrigger("ScalarVolume", "No", self.requestRender) # sent from transform modified
     self.renderPending = False
 
   def cleanup(self):
@@ -1046,6 +1070,65 @@ class ShaderComputationLogic(ScriptedLoadableModuleLogic):
   def __init__(self):
     ScriptedLoadableModuleLogic.__init__(self)
     # TODO: these strings can move to a CommonGL spot once debugged
+
+  def volumeRenderingDisplayNode(self,volumeNode):
+    """Get the display node or create a new one if missing"""
+    displayNode = None
+    displayNodeCount = volumeNode.GetNumberOfDisplayNodes()
+    for displayNodeIndex in range(displayNodeCount):
+      thisDisplayNode = volumeNode.GetNthDisplayNode(displayNodeIndex)
+      if thisDisplayNode.GetClassName() == 'vtkMRMLGPURayCastVolumeRenderingDisplayNode':
+          displayNode = thisDisplayNode
+    if not displayNode:
+      displayNode = ShaderComputationLogic().createVolumeDisplayNode(volumeNode, (1,1,1))
+    return displayNode
+
+  def createVolumeDisplayNode(self,volumeNode,baseColor=(1,1,1)):
+    """Adds a volume rendering display node to a volume node"""
+
+    # create the volume property node with default transfer functions
+    volumePropertyNode = slicer.vtkMRMLVolumePropertyNode()
+    volumePropertyNode.SetName(volumeNode.GetName() + '-VP')
+    scalarOpacity = vtk.vtkPiecewiseFunction()
+    volumePropertyNode.SetScalarOpacity(scalarOpacity)
+    gradientOpacity = vtk.vtkPiecewiseFunction()
+    volumePropertyNode.SetGradientOpacity(gradientOpacity)
+    colorTransfer = vtk.vtkColorTransferFunction()
+    volumePropertyNode.SetColor(colorTransfer, 0)
+    slicer.mrmlScene.AddNode(volumePropertyNode)
+    # create the display node and give it the volume property
+    displayNode = slicer.vtkMRMLGPURayCastVolumeRenderingDisplayNode()
+    displayNode.SetName(volumeNode.GetName() + '-VR')
+    displayNode.SetAndObserveVolumePropertyNodeID(volumePropertyNode.GetID())
+    displayNode.SetVisibility(1)
+    slicer.mrmlScene.AddNode(displayNode)
+    volumeNode.AddAndObserveDisplayNodeID(displayNode.GetID())
+
+    # guess the transfer function based on the volume data
+    scalarRange = volumeNode.GetImageData().GetScalarRange()
+    rangeWidth = scalarRange[1] - scalarRange[0]
+    rangeCenter = scalarRange[0] + rangeWidth * 0.5
+    scalarOpacityPoints = (
+            (scalarRange[0], 0.),
+            (rangeCenter - 0.1 * rangeWidth, 0.),
+            (rangeCenter + 0.1 * rangeWidth, 1.),
+            (scalarRange[1], 1.) )
+    for point in scalarOpacityPoints:
+      scalarOpacity.AddPoint(*point)
+    gradientOpacityPoints = (
+            (0, 0.),
+            (rangeCenter - 0.1 * rangeWidth, 0.),
+            (rangeCenter + 0.1 * rangeWidth, 1.),
+            (scalarRange[1], 1.) )
+    for point in gradientOpacityPoints:
+      gradientOpacity.AddPoint(*point)
+    colorPoints = (
+            (scalarRange[0], baseColor),
+            (scalarRange[1], baseColor) )
+    for intensity,rgb in colorPoints:
+      colorTransfer.AddRGBPoint(intensity, *rgb)
+
+    return displayNode
 
   def headerSource(self):
     return ("""
@@ -1298,7 +1381,7 @@ class ShaderComputationTest(ScriptedLoadableModuleTest):
     if not volumeToRender:
       logging.info("Getting Volume %s" % name)
       volumeToRender = method()
-    self.volumeDisplayNode(volumeToRender, (1,1,1))
+    ShaderComputationLogic().createVolumeDisplayNode(volumeToRender, (1,1,1))
 
   def amigoMRUSData(self):
     preopT2orig = 'https://docs.google.com/uc?authuser=1&id=0Bygzw56l1ZC-Q0dCLThIelVVaFE&export=download'
@@ -1318,9 +1401,10 @@ class ShaderComputationTest(ScriptedLoadableModuleTest):
   def amigoMRUSPreIntraData(self):
     preopT2orig = 'https://docs.google.com/uc?authuser=1&id=0Bygzw56l1ZC-Q0dCLThIelVVaFE&export=download'
     preopT2smooth = 'https://docs.google.com/uc?authuser=1&id=0Bygzw56l1ZC-Q0dCLThIelVVaFE&export=download'
+    preopT2smoothN4 = 'https://drive.google.com/drive/u/0/folders/0Bygzw56l1ZC-QzBkYktZa3RhazA'
     source = ( 'MR-US Neuro PreIntra',
               ('https://docs.google.com/uc?authuser=1&id=0Bygzw56l1ZC-UmhGUk51NXdpZ3M&export=download',
-               preopT2smooth
+               preopT2smoothN4
               ),
               ('intra-US.nrrd', 'preop-T2-smooth.nrrd'),
               ('intra-US','preop-T2')
@@ -1328,56 +1412,12 @@ class ShaderComputationTest(ScriptedLoadableModuleTest):
     import SampleData
     return SampleData.SampleDataLogic().downloadFromSource(SampleData.SampleDataSource(*source))
 
-  def volumeDisplayNode(self,volumeNode,baseColor=(1,1,1)):
-    """Adds a volume rendering display node to a volume node"""
-
-    # create the volume property node with default transfer functions
-    volumePropertyNode = slicer.vtkMRMLVolumePropertyNode()
-    volumePropertyNode.SetName(volumeNode.GetName() + '-VP')
-    scalarOpacity = vtk.vtkPiecewiseFunction()
-    volumePropertyNode.SetScalarOpacity(scalarOpacity)
-    gradientOpacity = vtk.vtkPiecewiseFunction()
-    volumePropertyNode.SetGradientOpacity(gradientOpacity)
-    colorTransfer = vtk.vtkColorTransferFunction()
-    volumePropertyNode.SetColor(colorTransfer, 0)
-    slicer.mrmlScene.AddNode(volumePropertyNode)
-    # create the display node and give it the volume property
-    displayNode = slicer.vtkMRMLGPURayCastVolumeRenderingDisplayNode()
-    displayNode.SetName(volumeNode.GetName() + '-VR')
-    displayNode.SetAndObserveVolumePropertyNodeID(volumePropertyNode.GetID())
-    slicer.mrmlScene.AddNode(displayNode)
-    volumeNode.AddAndObserveDisplayNodeID(displayNode.GetID())
-
-    # guess the transfer function based on the volume data
-    scalarRange = volumeNode.GetImageData().GetScalarRange()
-    rangeWidth = scalarRange[1] - scalarRange[0]
-    rangeCenter = scalarRange[0] + rangeWidth * 0.5
-    scalarOpacityPoints = (
-            (scalarRange[0], 0.),
-            (rangeCenter - 0.1 * rangeWidth, 0.),
-            (rangeCenter + 0.1 * rangeWidth, 1.),
-            (scalarRange[1], 1.) )
-    for point in scalarOpacityPoints:
-      scalarOpacity.AddPoint(*point)
-    gradientOpacityPoints = (
-            (0, 0.),
-            (rangeWidth * 0.01, 0.),
-            (rangeWidth * 0.2, 1.),
-            (scalarRange[1], 1.) )
-    for point in gradientOpacityPoints:
-      gradientOpacity.AddPoint(*point)
-    colorPoints = (
-            (scalarRange[0], baseColor),
-            (scalarRange[1], baseColor) )
-    for intensity,rgb in colorPoints:
-      colorTransfer.AddRGBPoint(intensity, *rgb)
-
   def amigoScenario(self):
     """Load MR and US data to emulate intraprocedural imaging"""
     # self.amigoMRUSData()
     nodes = self.amigoMRUSPreIntraData()
-    self.volumeDisplayNode(nodes[0], (0,1,0))
-    self.volumeDisplayNode(nodes[1], (1,1,1))
+    ShaderComputationLogic().createVolumeDisplayNode(nodes[0], (0,1,0))
+    ShaderComputationLogic().createVolumeDisplayNode(nodes[1], (1,1,1))
 
   def addFiducials(self):
     shaderFiducials = slicer.util.getNode('shaderFiducials')

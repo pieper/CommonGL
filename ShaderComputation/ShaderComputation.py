@@ -1114,6 +1114,7 @@ class ShaderComputationLogic(ScriptedLoadableModuleLogic):
     displayNode.SetName(volumeNode.GetName() + '-VR')
     displayNode.SetAndObserveVolumePropertyNodeID(volumePropertyNode.GetID())
     displayNode.SetVisibility(1)
+    displayNode.SetAndObserveVolumeNodeID(volumeNode.GetID())
     slicer.mrmlScene.AddNode(displayNode)
     volumeNode.AddAndObserveDisplayNodeID(displayNode.GetID())
 

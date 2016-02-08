@@ -123,6 +123,8 @@ class IsobrushEffectTool(LabelEffect.LabelEffectTool):
     # interaction state variables - track if painting or not
     self.actionState = None
 
+    self.mode = 'isograph' # TODO: could be a node setting controlled by gui
+
     #
     # cursor actor (paint preview)
     #
@@ -219,10 +221,10 @@ class IsobrushEffectTool(LabelEffect.LabelEffectTool):
     if caller and caller.IsA('vtkMRMLSliceNode'):
       # here you can respond to pan/zoom or other changes
       # to the view
-      pass
-      self.previewOn()
+      xy = self.interactor.GetEventPosition()
+      self.previewOn(xy)
 
-  def previewOn(self, xy=(100,100)):
+  def previewOnConnectedFill(self, xy=(100,100)):
 
     if not self.editUtil.getBackgroundImage() or not self.editUtil.getLabelImage():
       return
@@ -246,12 +248,12 @@ class IsobrushEffectTool(LabelEffect.LabelEffectTool):
     self.labelTextureImage.Activate(1)
 
     # make a result image to match dimensions and type
-    resultImage = vtk.vtkImageData()
-    resultImage.SetDimensions(backgroundDimensions)
-    resultImage.AllocateScalars(vtk.VTK_UNSIGNED_CHAR, 4)
-    self.shaderComputation.SetResultImageData(resultImage)
+    self.resultImage = vtk.vtkImageData()
+    self.resultImage.SetDimensions(backgroundDimensions)
+    self.resultImage.AllocateScalars(vtk.VTK_UNSIGNED_CHAR, 4)
+    self.shaderComputation.SetResultImageData(self.resultImage)
     self.shaderComputation.AcquireResultRenderbuffer()
-    self.resultImageTexture.SetImageData(resultImage)
+    self.resultImageTexture.SetImageData(self.resultImage)
     self.resultImageTexture.Activate(2)
 
     # make another  result image for iteration
@@ -343,9 +345,117 @@ class IsobrushEffectTool(LabelEffect.LabelEffectTool):
     self.shaderComputation.ReadResult()
     self.shaderComputation.ReleaseResultRenderbuffer()
 
-    self.cursorMapper.SetInputDataObject(resultImage)
+    self.cursorMapper.SetInputDataObject(self.resultImage)
     self.cursorActor.VisibilityOn()
     self.sliceView.forceRender()
+
+  def previewOnIsograph(self, xy=(100,100)):
+
+    if not self.editUtil.getBackgroundImage() or not self.editUtil.getLabelImage():
+      return
+
+    #
+    # get the visible section of the background (pre-window/level)
+    # to use as input to the shader code
+    #
+    sliceLogic = self.sliceWidget.sliceLogic()
+
+    backgroundLogic = sliceLogic.GetBackgroundLayer()
+    backgroundLogic.GetReslice().Update()
+    backgroundImage = backgroundLogic.GetReslice().GetOutputDataObject(0)
+    backgroundDimensions = backgroundImage.GetDimensions()
+    self.backgroundTextureImage.SetImageData(backgroundImage)
+    self.backgroundTextureImage.Activate(0)
+
+    # make a result image to match dimensions and type
+    self.resultImage = vtk.vtkImageData()
+    self.resultImage.SetDimensions(backgroundDimensions)
+    self.resultImage.AllocateScalars(vtk.VTK_UNSIGNED_CHAR, 4)
+    self.shaderComputation.SetResultImageData(self.resultImage)
+
+    fragmentShaderSource = """
+      #version 120
+      #define M_PI 3.1415926535897932384626433832795
+      #define M_2PI (2. * M_PI)
+      #define UNITIALIZED -99
+      varying vec3 interpolatedTextureCoordinate;
+      uniform sampler3D textureUnit0; // background
+      void main()
+      {
+        vec3 referenceTextureCoordinate = vec3(%(referenceX)f, %(referenceY)f, .5); // mouse
+
+        float minimumMetric = UNITIALIZED;
+        float metric = 0.;
+
+        float angleStep = M_2PI / %(rotationSteps)d;
+        mat3 stepRotation = mat3(1);
+        for (int step = 0; step < %(rotationSteps)d; step++) {
+          float referenceSum = 0.;
+          float angle = step * angleStep;
+          stepRotation[0] = vec3( cos(angle), -sin(angle), 1);
+          stepRotation[1] = vec3( sin(angle),  cos(angle), 1);
+          float summedDifference = 0;
+          for (int offsetX = -%(kernelSize)d; offsetX <= %(kernelSize)d; offsetX++) {
+            for (int offsetY = -%(kernelSize)d; offsetY <= %(kernelSize)d; offsetY++) {
+              vec3 offset = vec3(offsetX * %(stepX)f, offsetY * %(stepY)f, 0);
+              vec4 referenceSample = %(sampleScale)f * texture3D(textureUnit0, referenceTextureCoordinate + offset);
+              referenceSum += referenceSample.r;
+              offset = stepRotation * offset;
+              vec4 stepSample = %(sampleScale)f * texture3D(textureUnit0, interpolatedTextureCoordinate + offset);
+              summedDifference += abs(referenceSample.r - stepSample.r);
+            }
+          }
+
+          // normalize to be a ratio compared to the mean value of the reference patch
+          float sampleCount = pow(2. * %(kernelSize)f + 1, 2.);
+          float normalizedDifference = summedDifference / sampleCount / referenceSum;
+
+          if (normalizedDifference < minimumMetric || minimumMetric == UNITIALIZED) {
+            minimumMetric = normalizedDifference;
+          }
+        }
+
+        if (minimumMetric < %(similarityThreshold)f ) {
+          metric = .75;
+        }
+
+        gl_FragColor = vec4(1,1,0,metric);
+
+      }
+    """ % {
+      'sampleScale' : 500.,
+      'similarityThreshold' : .005,
+      'rotationSteps' : 100,
+      'kernelSize' : 3,
+      'stepX' : 1. / float(backgroundDimensions[0]),
+      'stepY' : 1. / float(backgroundDimensions[1]),
+      'referenceX' : xy[0] / float(backgroundDimensions[0]),
+      'referenceY' : xy[1] / float(backgroundDimensions[1]),
+    }
+
+    self.shaderComputation.AcquireResultRenderbuffer()
+    self.shaderComputation.SetFragmentShaderSource(fragmentShaderSource)
+    self.shaderComputation.Compute()
+    self.shaderComputation.ReadResult()
+    self.shaderComputation.ReleaseResultRenderbuffer()
+
+    self.cursorMapper.SetInputDataObject(self.resultImage)
+    self.cursorActor.VisibilityOn()
+    self.sliceView.forceRender()
+
+    if False:
+      if not hasattr(self,'imageViewer'):
+        self.imageViewer = vtk.vtkImageViewer()
+        self.imageViewer.SetColorWindow(256)
+        self.imageViewer.SetColorLevel(128)
+      self.imageViewer.SetInputData(self.resultImage)
+      self.imageViewer.Render()
+
+  def previewOn(self, xy=(100,100)):
+    if self.mode == 'isograph':
+      self.previewOnIsograph(xy)
+    else:
+      self.previewOnConnectedFill(xy)
 
   def previewOff(self):
     self.cursorActor.VisibilityOff()

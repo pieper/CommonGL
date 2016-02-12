@@ -261,6 +261,7 @@ class FieldSampler(object):
     self.shaderComputation = shaderComputation
     self.textureUnit = textureUnit
     self.node = node
+    self.operator = '+='
 
   def checkResources(self):
     """TODO: look at the data and determine how much of the available OpenGL
@@ -286,6 +287,7 @@ class Fiducials(FieldSampler):
     self.shaderComputation = shaderComputation
     self.textureUnit = textureUnit
     self.node = node
+    self.operator = '*= 1. - '
 
     self.dummyImage = vtk.vtkImageData()
     self.dummyImage.SetDimensions(1,1,1)
@@ -539,10 +541,10 @@ class VolumeTexture(FieldSampler):
     return fieldSampleSource
 
 class LabelMapTexture(VolumeTexture):
-  """Most of the functionality is inherited, but a special sampler is used"""
+  """Most of the functionality is inherited from volume texture, but a special sampler is used"""
 
-  def __init__(self):
-    FieldSampler.__init__(self, shaderComputation, textureUnit, volumeNode)
+  def __init__(self, shaderComputation, textureUnit, volumeNode):
+    VolumeTexture.__init__(self, shaderComputation, textureUnit, volumeNode)
     self.textureImage.SetInterpolate(0)
 
   def fieldSampleSource(self):
@@ -756,7 +758,7 @@ class SceneRenderer(object):
           transferFunction(sample, gradientMagnitude, color, fieldOpacity);
 
           litColor += fieldOpacity * lightingModel(samplePoint, normal, color, eyeRayOrigin);
-          opacity += fieldOpacity;
+          opacity %(operator)s fieldOpacity;
     """
 
     fieldCombineTemplate = """
@@ -776,7 +778,8 @@ class SceneRenderer(object):
 
     for fieldSampler in self.fieldSamplersByNodeID.values():
       fieldCompositeSource += fieldSampleTemplate % {
-              'textureUnit' : fieldSampler.textureUnit
+              'textureUnit' : fieldSampler.textureUnit,
+              'operator' : fieldSampler.operator,
       }
 
     fieldCompositeSource +=  """
@@ -821,6 +824,12 @@ class SceneRenderer(object):
     textureUnitDeclaration = textureUnitDeclaration[:-1] + ';'
 
 
+    if not hasattr(self, 'volumeTexture'):
+      volumeNode = slicer.util.getNode('vtkMRMLScalarVolumeNode*')
+      if not volumeNode:
+        print('need at least one node to render')
+        return
+      self.volumeTexture = VolumeTexture(self.shaderComputation, 15, volumeNode)
     rayCastParameters = self.logic.rayCastVolumeParameters(self.volumeTexture.node)
     rayCastParameters.update({
           'rayMaxSteps' : 100000,
@@ -975,6 +984,9 @@ class ShaderComputationLogic(ScriptedLoadableModuleLogic):
     source += """
     }
     """
+
+    # TODO: add gradient opacity transfer function
+
     return source
 
   def rayCastVolumeParameters(self,volumeNode):
@@ -1047,6 +1059,8 @@ class ShaderComputationLogic(ScriptedLoadableModuleLogic):
     })
 
   def rayCastFragmentSource(self):
+    # TODO: get light model properties from the volume properties node
+    # TODO: get light locations from VTK
     return("""
       vec3 lightingModel( in vec3 samplePoint, in vec3 normal, in vec3 color, in vec3 eyeRayOrigin )
       {
@@ -1055,10 +1069,10 @@ class ShaderComputationLogic(ScriptedLoadableModuleLogic):
         vec3 Cambient = color;
         vec3 Cdiffuse = color;
         vec3 Cspecular = vec3(1.,1.,1.);
-        float Kambient = .30;
+        float Kambient = .50;
         float Kdiffuse = .95;
         float Kspecular = .90;
-        float Shininess = 15.;
+        float Shininess = 45.;
         vec3 pointLight = vec3(200., 2500., 1000.); // TODO - lighting model
 
         vec3 litColor = Kambient * Cambient;

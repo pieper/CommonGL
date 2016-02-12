@@ -22,6 +22,7 @@ add_subdirectory(ShadedActor)
 add_subdirectory(ShadedModels)
 add_subdirectory(Isobrush)
 add_subdirectory(ShaderComputation)
+add_subdirectory(GLFilters)
 ## NEXT_MODULE
 
 #-----------------------------------------------------------------------------

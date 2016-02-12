@@ -720,8 +720,15 @@ class VolumeTexture(FieldSampler):
 class LabelMapTexture(VolumeTexture):
   """Most of the functionality is inherited, but a special sampler is used"""
 
-  def __init__(self):
+  def __init__(self, shaderComputation, textureUnit, volumeNode):
     FieldSampler.__init__(self, shaderComputation, textureUnit, volumeNode)
+    try:
+      from vtkSlicerShadedActorModuleLogicPython import vtkOpenGLTextureImage
+    except ImportError:
+      import vtkAddon
+      vtkOpenGLTextureImage=vtkAddon.vtkOpenGLTextureImage
+    self.textureImage=vtkOpenGLTextureImage()
+    self.textureImage.SetShaderComputation(self.shaderComputation)
     self.textureImage.SetInterpolate(0)
 
   def transferFunctionSource(self):
@@ -925,7 +932,8 @@ class SceneRenderer(object):
           self.fieldSamplersByNodeID[id_] = VolumeTexture(self.shaderComputation, textureUnit, node)
           mappedNodeIDs.append(id_)
           print(id_, node.GetName(), 'mapped as', textureUnit)
-        if node.GetClassName() == 'vtkMRMLLabelMapVolumeNode':
+        # TODO: implement label map field
+        if False and node.GetClassName() == 'vtkMRMLLabelMapVolumeNode':
           textureUnit = self.getFreeTextureUnit()
           self.fieldSamplersByNodeID[id_] = LabelMapTexture(self.shaderComputation, textureUnit, node)
           mappedNodeIDs.append(id_)

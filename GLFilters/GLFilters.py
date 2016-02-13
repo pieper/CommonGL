@@ -134,24 +134,26 @@ class GLFiltersWidget(ScriptedLoadableModuleWidget):
     self.logic.run(self.inputSelector.currentNode(), self.outputSelector.currentNode(), imageThreshold)
 
 #
-# GLFilter
+# GLVolume
 #
 
-class GLFilter():
-  """The general code for filters applied to Slicer scalar volumes"""
+class GLVolume():
+  """The code to represent Slicer scalar volumes"""
 
-  def __init__(self,volumes,vertexShaderTemplate,fragmentShaderTemplate):
-    self.showImageViewer = True
-    self.vertexShaderTemplate = vertexShaderTemplate
-    self.fragmentShaderTemplate = fragmentShaderTemplate
+  def __init__(self,shaderComputation,textureUnit,volumeNode):
+    self.shaderComputation = shaderComputation
+    self.textureUnit = textureUnit
+    self.volumeNode = volumeNode
+    self.update()
 
-    inputVolume = volumes[0]
+  def update(self):
+    """to be called when image data has changed"""
+    self.image = self.volumeNode.GetImageData()
 
-    inputImage = inputVolume.GetImageData()
     self.shiftScale = vtk.vtkImageShiftScale()
-    self.shiftScale.SetInputData(inputImage)
+    self.shiftScale.SetInputData(self.image)
     self.shiftScale.SetOutputScalarTypeToUnsignedShort()
-    low, high = inputImage.GetScalarRange()
+    low, high = self.image.GetScalarRange()
     self.shiftScale.SetShift(-low)
     if high == low:
       scale = 1.
@@ -162,6 +164,31 @@ class GLFilter():
     self.sampleUnscale = high-low
     self.shiftScale.Update()
     normalizedImage = self.shiftScale.GetOutputDataObject(0)
+
+    self.textureImage=vtkOpenGLTextureImage()
+    self.textureImage.SetShaderComputation(self.shaderComputation)
+    self.textureImage.SetImageData(normalizedImage)
+    self.textureImage.Activate(self.textureUnit)
+    print('activated volume %s in textureUnit %d' % (self.volumeNode.GetName(), self.textureUnit))
+
+  def keys(self):
+    return {
+      'sampleUnshift%d' % self.textureUnit : self.sampleUnshift,
+      'sampleUnscale%d' % self.textureUnit : self.sampleUnscale,
+    }
+
+
+#
+# GLFilter
+#
+
+class GLFilter():
+  """The general code for filters applied to Slicer scalar volumes"""
+
+  def __init__(self,volumes,vertexShaderTemplate,fragmentShaderTemplate):
+    self.showImageViewer = True
+    self.vertexShaderTemplate = vertexShaderTemplate
+    self.fragmentShaderTemplate = fragmentShaderTemplate
 
     # make a result image to display
     self.resultImage = vtk.vtkImageData()
@@ -175,22 +202,23 @@ class GLFilter():
     # - uses dummy render window for framebuffer object context
     #
     self.shaderComputation=vtkOpenGLShaderComputation()
-    self.inputTextureImage=vtkOpenGLTextureImage()
-    self.inputTextureImage.SetShaderComputation(self.shaderComputation)
-    self.inputTextureImage.SetImageData(normalizedImage)
-    self.inputTextureImage.Activate(0)
+    self.glVolumes = []
+    for volume in volumes:
+      textureUnit = len(self.glVolumes)
+      self.glVolumes.append(GLVolume(self.shaderComputation, textureUnit, volume))
+      print('volume %s in textureUnit %d' % (volume.GetName(), textureUnit))
     self.shaderComputation.SetResultImageData(self.resultImage)
     self.shaderComputation.AcquireResultRenderbuffer()
 
   def compute(self,keys):
-    keys['sampleUnscale'] = self.sampleUnscale
-    keys['sampleUnshift'] = self.sampleUnshift
+    for glVolume in self.glVolumes:
+      keys.update(glVolume.keys())
     self.shaderComputation.SetVertexShaderSource(self.vertexShaderTemplate % keys)
     self.shaderComputation.SetFragmentShaderSource(self.fragmentShaderTemplate % keys)
     self.shaderComputation.Compute()
+    self.shaderComputation.ReadResult()
 
     if self.showImageViewer:
-      self.shaderComputation.ReadResult()
       if not hasattr(self,'imageViewer'):
         self.imageViewer = vtk.vtkImageViewer()
         self.imageViewer.SetPosition(20, 500)
@@ -198,6 +226,7 @@ class GLFilter():
         self.imageViewer.SetColorLevel(128)
       self.imageViewer.SetInputData(self.resultImage)
       self.imageViewer.Render()
+
 
 #
 # GLFiltersLogic
@@ -213,21 +242,8 @@ class GLFiltersLogic(ScriptedLoadableModuleLogic):
   https://github.com/Slicer/Slicer/blob/master/Base/Python/slicer/ScriptedLoadableModule.py
   """
 
-  def isValidInputOutputData(self, inputVolumeNode, outputVolumeNode):
-    """Validates if the output is not the same as input
-    """
-    if not inputVolumeNode:
-      logging.debug('isValidInputOutputData failed: no input volume node defined')
-      return False
-    if not outputVolumeNode:
-      logging.debug('isValidInputOutputData failed: no output volume node defined')
-      return False
-    if inputVolumeNode.GetID()==outputVolumeNode.GetID():
-      logging.debug('isValidInputOutputData failed: input and output volume is the same. Create a new volume for output to avoid this error.')
-      return False
-    return True
-
   def thresholdFilter(self, inputVolume, threshold):
+
     vertexShaderTemplate = """
       #version 120
       attribute vec3 vertexAttribute;
@@ -239,11 +255,12 @@ class GLFiltersLogic(ScriptedLoadableModuleLogic):
         gl_Position = vec4(vertexAttribute, 1.);
       }
     """
+
     fragmentShaderTemplate = """
       float textureSampleDenormalized(const in sampler3D volumeTextureUnit,
                                       const in vec3 stpPoint) {
-        return ( texture3D(volumeTextureUnit, stpPoint).r * %(sampleUnscale)f
-                                                          + %(sampleUnshift)f );
+        return ( texture3D(volumeTextureUnit, stpPoint).r * %(sampleUnscale0)f
+                                                          + %(sampleUnshift0)f );
       }
 
       varying vec3 interpolatedTextureCoordinate;
@@ -259,67 +276,25 @@ class GLFiltersLogic(ScriptedLoadableModuleLogic):
         }
       }
     """
+
     keys = {
       'threshold' : threshold + 100,
     }
+
     filter = GLFilter([inputVolume], vertexShaderTemplate, fragmentShaderTemplate)
-    filter.showImageViewer = False
+    filter.showImageViewer = True
 
     inputImage = inputVolume.GetImageData()
     slices = inputImage.GetDimensions()[2]
+
     for slice in range(slices):
       keys['slice'] = slice / (1. * slices)
       filter.compute(keys)
     return filter
 
+  def smoothFilter(self, inputVolume, outputVolume, sigma):
 
-  def threshold(self, inputVolume, threshold):
-
-    # since the OpenGL texture will be floats in the range 0 to 1, all negative values
-    # will get clamped to zero.  Also if the sample values aren't evenly spread through
-    # the zero to one space we may run into numerical issues.  So rescale the data to the
-    # to fit in the full range of the a 16 bit short.
-    # (any vtkImageData scalar type should work with this approach)
-    # TODO: move this to the vtkOpenGLTextureImage class
-    inputImage = inputVolume.GetImageData()
-    if not hasattr(self,'shiftScale'):
-      self.shiftScale = vtk.vtkImageShiftScale()
-    self.shiftScale.SetInputData(inputImage)
-    self.shiftScale.SetOutputScalarTypeToUnsignedShort()
-    low, high = inputImage.GetScalarRange()
-    self.shiftScale.SetShift(-low)
-    if high == low:
-      scale = 1.
-    else:
-      scale = (1. * vtk.VTK_UNSIGNED_SHORT_MAX) / (high-low)
-    self.shiftScale.SetScale(scale)
-    sampleUnshift = low
-    sampleUnscale = high-low
-    self.shiftScale.Update()
-    normalizedImage = self.shiftScale.GetOutputDataObject(0)
-
-    # make a result image to match dimensions and type
-    if not hasattr(self,'resultImage'):
-      self.resultImage = vtk.vtkImageData()
-      self.resultImage.SetDimensions((512,512,1))
-      self.resultImage.AllocateScalars(vtk.VTK_UNSIGNED_CHAR, 4)
-
-    #
-    # Shader computation
-    # - need to import class from module here since it may not be in sys.path
-    #   at startup time
-    # - uses dummy render window for framebuffer object context
-    #
-    if not hasattr(self,'shaderComputation'):
-      self.shaderComputation=vtkOpenGLShaderComputation()
-      self.inputTextureImage=vtkOpenGLTextureImage()
-      self.inputTextureImage.SetShaderComputation(self.shaderComputation)
-      self.inputTextureImage.SetImageData(normalizedImage)
-      self.inputTextureImage.Activate(0)
-      self.shaderComputation.SetResultImageData(self.resultImage)
-      self.shaderComputation.AcquireResultRenderbuffer()
-
-    self.shaderComputation.SetVertexShaderSource("""
+    vertexShaderTemplate = """
       #version 120
       attribute vec3 vertexAttribute;
       attribute vec2 textureCoordinateAttribute;
@@ -329,47 +304,36 @@ class GLFiltersLogic(ScriptedLoadableModuleLogic):
         interpolatedTextureCoordinate = vec3(textureCoordinateAttribute, .5);
         gl_Position = vec4(vertexAttribute, 1.);
       }
-    """)
+    """
 
-    fragmentShaderSource = """
-      float textureSampleDenormalized(const in sampler3D volumeTextureUnit,
-                                      const in vec3 stpPoint) {
-        return ( texture3D(volumeTextureUnit, stpPoint).r * %(sampleUnscale)f
-                                                          + %(sampleUnshift)f );
-      }
+    fragmentShaderTemplate = """
 
       varying vec3 interpolatedTextureCoordinate;
       uniform sampler3D textureUnit0; // input
+      uniform sampler3D textureUnit1; // output
       void main()
       {
-        vec3 samplePoint = vec3(interpolatedTextureCoordinate);
-        float sample = textureSampleDenormalized(textureUnit0,
-                                           vec3(samplePoint.xy, .5));
-        gl_FragColor = vec4(1., 1., 0., 1.);
-        if (sample > %(threshold)f) {
-          gl_FragColor = vec4(1., 0., 0., 1.);
-        }
+        vec3 samplePoint = vec3(interpolatedTextureCoordinate.xy, %(slice)f);
+        float normalizedSample = texture3D(textureUnit1, samplePoint).r;
+
+        gl_FragColor = vec4(vec3(normalizedSample), 1.);
       }
-    """ % {
-      'sampleUnshift' : sampleUnshift,
-      'sampleUnscale' : sampleUnscale,
-      'threshold' : threshold,
+    """
+
+    keys = {
+      'sigma' : sigma,
     }
 
-    self.shaderComputation.SetFragmentShaderSource(fragmentShaderSource)
-    self.shaderComputation.Compute()
-    self.shaderComputation.ReadResult()
-    # self.shaderComputation.ReleaseResultRenderbuffer()
+    filter = GLFilter([inputVolume, outputVolume], vertexShaderTemplate, fragmentShaderTemplate)
+    filter.showImageViewer = True
 
-    if True:
-      if not hasattr(self,'imageViewer'):
-        self.imageViewer = vtk.vtkImageViewer()
-        self.imageViewer.SetPosition(20, 500)
-        self.imageViewer.SetColorWindow(256)
-        self.imageViewer.SetColorLevel(128)
-      self.imageViewer.SetInputData(self.resultImage)
-      self.imageViewer.Render()
+    inputImage = inputVolume.GetImageData()
+    slices = inputImage.GetDimensions()[2]
 
+    for slice in range(slices):
+      keys['slice'] = slice / (1. * slices)
+      filter.compute(keys)
+    return filter
 
   def smooth(self, inputVolume, outputVolume, sigma):
 
@@ -492,10 +456,10 @@ class GLFiltersLogic(ScriptedLoadableModuleLogic):
     startTime = time.clock()
     logging.info('Processing started')
 
-    #self.threshold(inputVolume, imageThreshold)
     #self.smooth(inputVolume, outputVolume, imageThreshold)
 
-    self.filter = self.thresholdFilter(inputVolume, imageThreshold)
+    #self.filter = self.thresholdFilter(inputVolume, imageThreshold)
+    self.filter = self.smoothFilter(inputVolume, outputVolume, imageThreshold)
 
     endTime = time.clock()
     logging.info('%f Processing completed' % (endTime - startTime))

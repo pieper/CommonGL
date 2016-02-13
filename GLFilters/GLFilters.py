@@ -379,13 +379,15 @@ class GLFiltersLogic(ScriptedLoadableModuleLogic):
         vec4 sum = vec4(0.);
         for (int offsetX = -%(kernelSize)d; offsetX <= %(kernelSize)d; offsetX++) {
           for (int offsetY = -%(kernelSize)d; offsetY <= %(kernelSize)d; offsetY++) {
-            vec3 offset = %(kernelSpacing)f * vec3(offsetX, offsetY, 0);
-            vec4 sample = texture3D(textureUnit10, samplePoint + offset);
-            sum += sample;
+            for (int offsetZ = -%(kernelSize)d; offsetZ <= %(kernelSize)d; offsetZ++) {
+              vec3 offset = %(kernelSpacing)f * vec3(offsetX, offsetY, offsetZ);
+              vec4 sample = texture3D(textureUnit10, samplePoint + offset);
+              sum += sample;
+            }
           }
         }
 
-        float sampleCount = pow(2. * (%(kernelSize)f + 1.), 2.);
+        float sampleCount = pow(2. * (%(kernelSize)f + 1.), 3.);
         gl_FragColor = vec4(vec3(sum/sampleCount), 1.);
       }
     """
@@ -393,8 +395,8 @@ class GLFiltersLogic(ScriptedLoadableModuleLogic):
     keys = {
       'sampleUnshift' : sampleUnshift,
       'sampleUnscale' : sampleUnscale,
-      'kernelSize' : 3,
-      'kernelSpacing' : .02,
+      'kernelSize' : 5,
+      'kernelSpacing' : .005,
     }
     slices = inputImage.GetDimensions()[2]
     for slice in range(slices):
@@ -404,7 +406,7 @@ class GLFiltersLogic(ScriptedLoadableModuleLogic):
       outputTextureImage.AttachAsDrawTarget(0, slice)
       inputTextureImage.Activate(10)
       shaderComputation.Compute()
-      shaderComputation.ReadResult()
+      #shaderComputation.ReadResult()
 
       if False or self.showImageViewer:
         if not hasattr(self,'imageViewer'):

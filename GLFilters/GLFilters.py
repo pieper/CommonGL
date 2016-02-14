@@ -142,15 +142,22 @@ class GLFilter(object):
   """ Implement volume filtering with GLSL for mrml nodes
   """
 
-  def __init__(self, volumes, resultImage = None):
-    self.resultImage = resultImage
+  def __init__(self, inputVolumes, outputVolume):
+
+    if len(inputVolumes) < 1:
+      raise "Must have at least one input volume"
+    self.volume0 = inputVolumes[0]
+    if not self.volume0.GetImageData():
+      raise "Must have a valid input volume with image data"
+
+    self.outputVolume = outputVolume
     self.showImageViewer = False
 
     self.shaderComputation=vtkOpenGLShaderComputation()
 
     import ShaderComputation
     self.volumeTextures = []
-    for volume in volumes:
+    for volume in inputVolumes:
       textureUnit = len(self.volumeTextures)
       volumeTexture = ShaderComputation.VolumeTexture(
                                           self.shaderComputation,
@@ -158,16 +165,22 @@ class GLFilter(object):
                                           volume)
       self.volumeTextures.append(volumeTexture)
 
-    if not self.resultImage:
-      self.resultImage = vtk.vtkImageData()
-      self.resultImage.SetDimensions(512, 512, 1)
-      self.resultImage.AllocateScalars(vtk.VTK_UNSIGNED_CHAR, 4)
-    self.shaderComputation.SetResultImageData(self.resultImage)
+    resultImage = vtk.vtkImageData()
+    resultImage.SetDimensions(self.volume0.GetImageData().GetDimensions())
+    resultImage.AllocateScalars(vtk.VTK_UNSIGNED_CHAR, 4)
+    self.shaderComputation.SetResultImageData(resultImage)
+    self.shaderComputation.AcquireResultRenderbuffer()
 
-    self.imageViewer = vtk.vtkImageViewer()
-    self.imageViewer.SetColorLevel(128)
-    self.imageViewer.SetColorWindow(256)
-    self.imageViewer.SetPosition(20, 500)
+    # prepare output
+    rasToIJK = vtk.vtkMatrix4x4()
+    self.volume0.GetRASToIJKMatrix(rasToIJK)
+    self.outputVolume.SetRASToIJKMatrix(rasToIJK)
+    self.outputVolume.SetAndObserveTransformNodeID(self.volume0.GetTransformNodeID())
+    self.outputVolume.SetAndObserveImageData(resultImage)
+
+    self.outputTextureImage = vtkOpenGLTextureImage()
+    self.outputTextureImage.SetShaderComputation(self.shaderComputation)
+    self.outputTextureImage.SetImageData(resultImage)
 
     self.header = """
       #version 120
@@ -177,7 +190,6 @@ class GLFilter(object):
         return samplePoint; // identity
       }
     """
-
     # need to declare each texture unit as a uniform passed in
     # from the host code; these are done in the vtkOpenGLTextureImage instances
     self.header += "uniform sampler3D "
@@ -185,32 +197,40 @@ class GLFilter(object):
       self.header += "textureUnit%d," % volumeTexture.textureUnit
     self.header = self.header[:-1] + ';'
 
-    self.shaderComputation.AcquireResultRenderbuffer()
 
+  def compute(self,vertexShader, fragmentShader, keys={}):
 
-  def compute(self,vertexShader, fragmentShader):
+    slices = self.volume0.GetImageData().GetDimensions()[2]
+    for slice in range(slices):
+      # draw into output texture TODO: move into VolumeTexture class
+      self.outputTextureImage.AttachAsDrawTarget(0, slice)
+      # activate the textures 
+      samplersSource = ''
+      for volumeTexture in self.volumeTextures:
+        volumeTexture.textureImage.Activate(volumeTexture.textureUnit)
+        samplersSource += volumeTexture.fieldSampleSource()
+      # build the source with the slice key
+      keys['slice'] = slice / (1. * slices)
+      self.shaderComputation.SetVertexShaderSource(vertexShader % keys)
+      shaders = self.header + samplersSource + fragmentShader
+      self.shaderComputation.SetFragmentShaderSource(shaders % keys)
+      # perform the computation for this slice
+      self.shaderComputation.Compute()
 
-    samplersSource = ''
-    for volumeTexture in self.volumeTextures:
-      volumeTexture.updateFromMRML()
-      samplersSource += volumeTexture.fieldSampleSource()
+    print('reading back')
+    self.outputTextureImage.ReadBack()
 
-    self.shaderComputation.SetVertexShaderSource(vertexShader)
-    shaders = self.header + samplersSource + fragmentShader
-    self.shaderComputation.SetFragmentShaderSource(shaders)
+    print('extracting')
+    extractComponents = vtk.vtkImageExtractComponents()
+    extractComponents.SetInputData(self.outputVolume.GetImageData())
+    extractComponents.Update()
+    self.outputVolume.SetAndObserveImageData(extractComponents.GetOutputDataObject(0))
 
-    self.shaderComputation.Compute()
-    self.shaderComputation.ReadResult()
-    #self.shaderComputation.ReleaseResultRenderbuffer()
-
-    if self.showImageViewer:
-      self.imageViewer.SetInputData(self.resultImage)
-      self.imageViewer.Render()
-
-    if False:
-      fp = open('/tmp/shader.glsl','w')
-      fp.write(self.shaderComputation.GetFragmentShaderSource())
-      fp.close()
+    # make output match input geometry
+    rasToIJK = vtk.vtkMatrix4x4()
+    self.volume0.GetRASToIJKMatrix(rasToIJK)
+    self.outputVolume.SetRASToIJKMatrix(rasToIJK)
+    self.outputVolume.SetAndObserveTransformNodeID(self.volume0.GetTransformNodeID())
 
 
 #
@@ -232,21 +252,7 @@ class GLFiltersLogic(ScriptedLoadableModuleLogic):
 
   def smoothFilter(self, inputVolume, outputVolume, sigma):
 
-    # make the image data for the output volume
-    inputImage = inputVolume.GetImageData()
-    outputImage = vtk.vtkImageData()
-    outputImage.SetDimensions(inputImage.GetDimensions())
-    outputImage.AllocateScalars(vtk.VTK_UNSIGNED_CHAR, 4)
-    #outputImage.AllocateScalars(vtk.VTK_UNSIGNED_SHORT, 1)
-    outputVolume.SetAndObserveImageData(outputImage)
-
-    # make output match input geometry
-    rasToIJK = vtk.vtkMatrix4x4()
-    inputVolume.GetRASToIJKMatrix(rasToIJK)
-    outputVolume.SetRASToIJKMatrix(rasToIJK)
-    outputVolume.SetAndObserveTransformNodeID(inputVolume.GetTransformNodeID())
-
-    filter = GLFilter([inputVolume, outputVolume], resultImage=outputImage)
+    filter = GLFilter([inputVolume,], outputVolume,)
     filter.showImageViewer = True
 
     vertexShaderTemplate = """
@@ -265,33 +271,20 @@ class GLFiltersLogic(ScriptedLoadableModuleLogic):
       varying vec3 interpolatedTextureCoordinate;
       void main()
       {
-        vec3 samplePoint = vec3(interpolatedTextureCoordinate);
+        vec3 samplePoint = vec3(interpolatedTextureCoordinate.xy, %(slice)f);
         float sample = textureSampleDenormalized0(textureUnit0,
                                            vec3(samplePoint.xy, .5));
 
         float normalizedSample = texture3D(textureUnit0,
                              vec3(interpolatedTextureCoordinate.xy,%(slice)f)).r;
 
+        gl_FragColor = vec4(sin(100.*samplePoint), 1.);
         gl_FragColor = vec4(vec3(normalizedSample), 1.);
       }
     """
 
-    outputTexture = filter.volumeTextures[1].textureImage
     keys = {}
-    slices = inputImage.GetDimensions()[2]
-    for slice in range(slices):
-      keys['slice'] = slice / (1. * slices)
-      #outputTexture.AttachAsDrawTarget(0, slice)
-      filter.compute(vertexShaderTemplate % keys, fragmentShaderTemplate % keys)
-
-    print('reading back')
-    outputTexture.ReadBack()
-
-    print('extracting')
-    extractComponents = vtk.vtkImageExtractComponents()
-    extractComponents.SetInputData(outputImage)
-    extractComponents.Update()
-    outputVolume.SetAndObserveImageData(extractComponents.GetOutputDataObject(0))
+    filter.compute(vertexShaderTemplate, fragmentShaderTemplate, keys)
 
     return filter
 
@@ -395,7 +388,7 @@ class GLFiltersLogic(ScriptedLoadableModuleLogic):
     keys = {
       'sampleUnshift' : sampleUnshift,
       'sampleUnscale' : sampleUnscale,
-      'kernelSize' : 5,
+      'kernelSize' : 3,
       'kernelSpacing' : .005,
     }
     slices = inputImage.GetDimensions()[2]
@@ -434,13 +427,13 @@ class GLFiltersLogic(ScriptedLoadableModuleLogic):
     Run the actual algorithm
     """
     import time
-    startTime = time.clock()
+    startTime = time.time()
     logging.info('Processing started')
 
-    self.smooth(inputVolume, outputVolume, imageThreshold)
-    #self.filter = self.smoothFilter(inputVolume, outputVolume, imageThreshold)
+    #self.smooth(inputVolume, outputVolume, imageThreshold)
+    self.filter = self.smoothFilter(inputVolume, outputVolume, imageThreshold)
 
-    endTime = time.clock()
+    endTime = time.time()
     logging.info('%f Processing completed' % (endTime - startTime))
 
     return True

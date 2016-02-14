@@ -393,9 +393,10 @@ class VolumeTexture(FieldSampler):
   """Maps a volume node to a GLSL renderable collection
   of textures and code"""
 
-  def __init__(self, shaderComputation, textureUnit, volumeNode):
+  def __init__(self, shaderComputation, textureUnit, volumeNode, optimizeDynamicRange=True):
     FieldSampler.__init__(self, shaderComputation, textureUnit, volumeNode)
     self.shiftScale = vtk.vtkImageShiftScale()
+    self.optimizeDynamicRange = optimizeDynamicRange
 
     try:
       from vtkSlicerShadedActorModuleLogicPython import vtkOpenGLTextureImage
@@ -408,26 +409,34 @@ class VolumeTexture(FieldSampler):
     self.updateFromMRML()
 
   def updateFromMRML(self):
-    # since the OpenGL texture will be floats in the range 0 to 1, all negative values
-    # will get clamped to zero.  Also if the sample values aren't evenly spread through
-    # the zero to one space we may run into numerical issues.  So rescale the data to the
-    # to fit in the full range of the a 16 bit short.
-    # (any vtkImageData scalar type should work with this approach)
-    self.shiftScale.SetInputData(self.node.GetImageData())
-    self.shiftScale.SetOutputScalarTypeToUnsignedShort()
-    low, high = self.node.GetImageData().GetScalarRange()
-    self.shiftScale.SetShift(-low)
-    if high == low:
-      scale = 1.
-    else:
-      scale = (1. * vtk.VTK_UNSIGNED_SHORT_MAX) / (high-low)
-    self.shiftScale.SetScale(scale)
-    self.sampleUnshift = low
-    self.sampleUnscale = high-low
+    if self.optimizeDynamicRange:
+      # since the OpenGL texture will be floats in the range 0 to 1,
+      # all negative values will get clamped to zero.
+      # Also if the sample values aren't evenly spread through
+      # the zero-to-one space we may run into numerical issues.
+      # So rescale the data to the
+      # to fit in the full range of the a 16 bit short.
+      # (any vtkImageData scalar type should work with this approach)
+      self.shiftScale.SetInputData(self.node.GetImageData())
+      self.shiftScale.SetOutputScalarTypeToUnsignedShort()
+      low, high = self.node.GetImageData().GetScalarRange()
+      self.shiftScale.SetShift(-low)
+      if high == low:
+        scale = 1.
+      else:
+        scale = (1. * vtk.VTK_UNSIGNED_SHORT_MAX) / (high-low)
+      self.shiftScale.SetScale(scale)
+      self.sampleUnshift = low
+      self.sampleUnscale = high-low
 
-    self.shiftScale.Update()
-    self.textureImage.SetImageData(self.shiftScale.GetOutputDataObject(0))
-    self.textureImage.Activate(self.textureUnit);
+      self.shiftScale.Update()
+      self.textureImage.SetImageData(self.shiftScale.GetOutputDataObject(0))
+    else:
+      self.sampleUnshift = 0
+      self.sampleUnscale = 1
+      self.textureImage.SetImageData(self.node.GetImageData())
+    self.textureImage.Activate(self.textureUnit)
+
 
   def sampleVolumeParameters(self):
     """Calculate the dictionary of substitutions for the
@@ -835,13 +844,13 @@ class SceneRenderer(object):
       from vtkSlicerShadedActorModuleLogicPython import vtkOpenGLShaderComputation
     except ImportError:
       import vtkAddon
-    vtkOpenGLShaderComputation=vtkAddon.vtkOpenGLShaderComputation
+      vtkOpenGLShaderComputation=vtkAddon.vtkOpenGLShaderComputation
     self.shaderComputation=vtkOpenGLShaderComputation()
 
     self.shaderComputation.SetVertexShaderSource(self.logic.rayCastVertexShaderSource())
 
     self.resultImage = vtk.vtkImageData()
-    self.resultImage.SetDimensions(1024, 1024, 1)
+    self.resultImage.SetDimensions(512, 512, 1)
     self.resultImage.AllocateScalars(vtk.VTK_UNSIGNED_CHAR, 4)
     self.shaderComputation.SetResultImageData(self.resultImage)
 
@@ -888,7 +897,6 @@ class SceneRenderer(object):
     self._active = True
     self.updateFieldSamplers()
     self.render()
-
 
   def setVolume(self, volumeNode):
     self.volumeTexture = VolumeTexture(self.shaderComputation, 15, volumeNode)

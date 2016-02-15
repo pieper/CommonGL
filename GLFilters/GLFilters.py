@@ -241,6 +241,7 @@ class GLFilter(object):
       targetVolumeTexture = self.iterationVolumeTextures[iteration%2]
       targetTextureImage = targetVolumeTexture.textureImage
       self.iteration(targetTextureImage)
+      logging.info('%f iteration %d' % (time.time() - startTime, iteration))
 
     targetTextureImage.ReadBack()
 
@@ -252,6 +253,7 @@ class GLFilter(object):
     self.outputVolume.SetAndObserveImageData(extractComponents.GetOutputDataObject(0))
 
     logging.info('%f computation finished' % (time.time() - startTime))
+    logging.info('')
 
 #
 # GLFiltersLogic
@@ -289,6 +291,21 @@ class GLFiltersLogic(ScriptedLoadableModuleLogic):
 
       void main()
       {
+
+
+
+        # TODO pass in texture units as symbols
+
+        sampler3D sourceTexture;
+        if (%(iteration) == 0) {
+          sourceTexture = textureUnit0;
+        } else {
+          sourceTexture = %(iterationTextureUnit)s;
+        }
+
+
+
+
         vec3 samplePoint = vec3(interpolatedTextureCoordinate.xy,slice);
 
         vec4 sum = vec4(0.);
@@ -312,7 +329,7 @@ class GLFiltersLogic(ScriptedLoadableModuleLogic):
       'kernelSpacing' : sigma,
     }
 
-    filter_.compute(vertexShaderTemplate, fragmentShaderTemplate, keys)
+    filter_.compute(vertexShaderTemplate, fragmentShaderTemplate, keys, 3)
 
     return filter_
 

@@ -203,8 +203,9 @@ class GLFilter(object):
     # need to declare each texture unit as a uniform passed in
     # from the host code; these are done in the vtkOpenGLTextureImage instances
     self.header += "uniform sampler3D "
-    for volumeTexture in self.volumeTextures:
-      self.header += "textureUnit%d," % volumeTexture.textureUnit
+    textureUnitCount = len(self.volumeTextures) + len(self.iterationVolumeTextures)
+    for textureUnit in range(textureUnitCount):
+      self.header += "textureUnit%d," % textureUnit
     self.header = self.header[:-1] + ';'
 
   def iteration(self, targetTextureImage):
@@ -230,7 +231,10 @@ class GLFilter(object):
     for iteration in range(iterations):
       # build the source
       keys['iteration'] = iteration
-      keys['iterationTextureUnit'] = 'textureUnit' + str((iteration+1)%2)
+      if iteration == 0:
+        keys['iterationTextureUnit'] = 'textureUnit0'
+      else:
+        keys['iterationTextureUnit'] = 'textureUnit' + str((iteration+1)%2)
       self.shaderComputation.SetVertexShaderSource(vertexShader % keys)
       samplersSource = ''
       for volumeTexture in self.volumeTextures:
@@ -291,21 +295,6 @@ class GLFiltersLogic(ScriptedLoadableModuleLogic):
 
       void main()
       {
-
-
-
-        # TODO pass in texture units as symbols
-
-        sampler3D sourceTexture;
-        if (%(iteration) == 0) {
-          sourceTexture = textureUnit0;
-        } else {
-          sourceTexture = %(iterationTextureUnit)s;
-        }
-
-
-
-
         vec3 samplePoint = vec3(interpolatedTextureCoordinate.xy,slice);
 
         vec4 sum = vec4(0.);
@@ -313,7 +302,7 @@ class GLFiltersLogic(ScriptedLoadableModuleLogic):
           for (int offsetY = -%(kernelSize)d; offsetY <= %(kernelSize)d; offsetY++) {
             for (int offsetZ = -%(kernelSize)d; offsetZ <= %(kernelSize)d; offsetZ++) {
               vec3 offset = %(kernelSpacing)f * vec3(offsetX, offsetY, offsetZ);
-              vec4 sample = texture3D(textureUnit0, samplePoint + offset);
+              vec4 sample = texture3D(%(iterationTextureUnit)s, samplePoint + offset);
               sum += sample;
             }
           }
@@ -325,11 +314,11 @@ class GLFiltersLogic(ScriptedLoadableModuleLogic):
     """
 
     keys = {
-      'kernelSize' : 3,
+      'kernelSize' : 5,
       'kernelSpacing' : sigma,
     }
 
-    filter_.compute(vertexShaderTemplate, fragmentShaderTemplate, keys, 3)
+    filter_.compute(vertexShaderTemplate, fragmentShaderTemplate, keys, 10)
 
     return filter_
 

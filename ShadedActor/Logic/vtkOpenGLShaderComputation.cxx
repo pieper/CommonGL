@@ -91,30 +91,38 @@ static GLuint CompileShader ( vtkOpenGLShaderComputation *self, GLenum type, con
 
   // Compile the shader
   glCompileShader ( shader );
+  vtkOpenGLStaticCheckErrorMacro("after compiling shader");
 
   // Check the compile status
   glGetShaderiv ( shader, GL_COMPILE_STATUS, &compiled );
-
   if ( !compiled )
     {
     GLint infoLen = 0;
-
     glGetShaderiv ( shader, GL_INFO_LOG_LENGTH, &infoLen );
-
     if ( infoLen > 1 )
       {
       char *infoLog = (char *) malloc ( sizeof ( char ) * infoLen );
-
       glGetShaderInfoLog ( shader, infoLen, NULL, infoLog );
-      vtkErrorWithObjectMacro (self, "Error compiling shader\n" << infoLog );
-
+      switch(type)
+        {
+        case GL_VERTEX_SHADER:
+          vtkErrorWithObjectMacro (self, "Error compiling vertex shader\n" << infoLog );
+          break;
+        case GL_FRAGMENT_SHADER:
+          vtkErrorWithObjectMacro (self, "Error compiling fragment shader\n" << infoLog );
+          break;
+        default:
+          vtkErrorWithObjectMacro (self, "Error compiling unknown shader type!\n" << infoLog );
+          break;
+        }
       free ( infoLog );
       }
-
+      vtkOpenGLStaticCheckErrorMacro("after checking compile status");
       glDeleteShader ( shader );
       vtkOpenGLStaticCheckErrorMacro("after deleting bad shader");
       return 0;
     }
+
   vtkOpenGLStaticCheckErrorMacro("after compiling shader");
   return shader;
 }
@@ -333,7 +341,7 @@ void vtkOpenGLShaderComputation::ReleaseResultRenderbuffer()
 //----------------------------------------------------------------------------
 // Perform the computation
 //
-void vtkOpenGLShaderComputation::Compute()
+void vtkOpenGLShaderComputation::Compute(float slice)
 {
   // bail out early if we aren't configured corretly
   if (this->VertexShaderSource == NULL || this->FragmentShaderSource == NULL)
@@ -417,19 +425,27 @@ void vtkOpenGLShaderComputation::Compute()
   strncpy(textureUnitUniformString, "textureUnit__", 14);
   char textureUnitLength = 11; // Up to the two underscores that will be replaced
   char asciiUnit[3]; // target for snprintf
-  int unitIndex; 
+  int unitIndex;
   for (unitIndex = 0; unitIndex < __TEXTURE_UNIT_COUNT; unitIndex++)
     {
     snprintf(asciiUnit, 3, "%d", unitIndex);
     strncpy(textureUnitUniformString + textureUnitLength, asciiUnit, 2);
     GLint textureUnitSamplerLocation = glGetUniformLocation(this->ProgramObject, textureUnitUniformString);
-    if ( textureUnitSamplerLocation >= 0 ) 
+    if ( textureUnitSamplerLocation >= 0 )
       {
       glUniform1i(textureUnitSamplerLocation, unitIndex);
       vtkOpenGLCheckErrorMacro("after setting texture unit uniform " << unitIndex);
       }
     }
   vtkOpenGLCheckErrorMacro("after setting texture unit uniforms");
+
+  // pass in the slice location.  
+  // TODO: generalize uniform arguments, create vtkVariantMap
+  GLint sliceLocation = glGetUniformLocation(this->ProgramObject, "slice");
+  if ( sliceLocation >= 0 )
+    {
+    glUniform1f(sliceLocation, slice);
+    }
 
   //
   // GO!

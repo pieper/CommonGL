@@ -38,6 +38,7 @@ vtkOpenGLTextureImage::vtkOpenGLTextureImage()
   this->ShaderComputation = NULL;
   this->ImageData = NULL;
   this->TextureName = 0;
+  this->Interpolate = 1;
   this->TextureMTime = 0;
 }
 
@@ -128,8 +129,16 @@ bool vtkOpenGLTextureImage::UpdateTexture()
 
   glGenTextures(1, &(this->TextureName));
   glBindTexture(GL_TEXTURE_3D, this->TextureName);
-  glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-  glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+  if (this->Interpolate)
+    {
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    }
+  else
+    {
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    }
   glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE);
   glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
   glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
@@ -166,7 +175,7 @@ void vtkOpenGLTextureImage::Activate(vtkTypeUInt32 unit)
 
   // TODO: check the actual number (also expose way to check the
   // number from a wrapped language).  For now use the minimum max value.
-  // of the enums, which only go to 15 even though 48 are meant to be 
+  // of the enums, which only go to 15 even though 48 are meant to be
   // supported according to the OpenGL spec.
   // glGetIntegerv(GL_MAX_TEXTURE_IMAGE_UNITS, &texture_units)
   #define __TEXTURE_UNIT_COUNT 16
@@ -182,7 +191,7 @@ void vtkOpenGLTextureImage::Activate(vtkTypeUInt32 unit)
     return;
     }
 
-  // TODO: 
+  // TODO:
   glActiveTexture(GL_TEXTURE0 + unit);
   glBindTexture(GL_TEXTURE_3D, this->TextureName);
 
@@ -219,6 +228,7 @@ void vtkOpenGLTextureImage::AttachAsDrawTarget(int attachmentIndex, int layer, i
 
   vtkOpenGLClearErrorMacro();
 
+  glBindTexture(GL_TEXTURE_3D, this->TextureName);
   vtkgl::FramebufferTexture3D(
     /* target */      vtkgl::FRAMEBUFFER,
     /* attachment */  vtkgl::COLOR_ATTACHMENT0,
@@ -243,6 +253,54 @@ void vtkOpenGLTextureImage::AttachAsDrawTarget(int attachmentIndex, int layer, i
       vtkErrorMacro("Bad framebuffer configuration, status is: " << status);
       return;
     }
+}
+
+//----------------------------------------------------------------------------
+void vtkOpenGLTextureImage::ReadBack()
+{
+
+  vtkOpenGLCheckErrorMacro("before getting");
+
+  if (!this->ShaderComputation || !this->ShaderComputation->GetInitialized())
+    {
+    vtkErrorMacro("No initialized ShaderComputation instance is set.");
+    return;
+    }
+  this->ShaderComputation->GetRenderWindow()->MakeCurrent();
+
+  int componentCount = this->ImageData->GetNumberOfScalarComponents();
+  GLenum format;
+  if ( componentCount == 1 )
+    {
+    format = GL_LUMINANCE;
+    }
+  else if ( componentCount == 4 )
+    {
+    format = GL_RGBA;
+    }
+  else
+    {
+    vtkErrorMacro("Must have 1 or 4 component image data for texture");
+    return;
+    }
+
+  vtkPointData *pointData = this->ImageData->GetPointData();
+  vtkDataArray *scalars = pointData->GetScalars();
+  void *pixels = scalars->GetVoidPointer(0);
+
+  // TODO:
+  glBindTexture(GL_TEXTURE_3D, this->TextureName);
+
+  glGetTexImage(
+    /* target */ GL_TEXTURE_3D,
+    /* level */  0,
+    /* format */ format,
+    /* type */   vtkScalarTypeToGLType(this->ImageData->GetScalarType()),
+    /* pixels */ pixels);
+
+  pointData->Modified();
+
+  vtkOpenGLCheckErrorMacro("after getting");
 }
 
 //----------------------------------------------------------------------------

@@ -65,6 +65,11 @@ public:
   vtkGetMacro(TextureName, vtkTypeUInt32);
 
   // Description:
+  // True (default) to interpolate samples
+  vtkGetMacro(Interpolate, int);
+  vtkSetMacro(Interpolate, int);
+
+  // Description:
   // Make the image data available as GL_TEXTUREn
   // where n is the texture unit.  There are at least
   // GL_MAX_COMBINED_TEXTURE_IMAGE_UNITS, which is variable
@@ -75,9 +80,13 @@ public:
   void Activate(vtkTypeUInt32 unit);
 
   // Description:
+  // Creates/transfers image data to texture if needed.
+  bool UpdateTexture();
+
+  // Description:
   // Make the specified layer (slice) be the draw target.
   // This is used to direct the output of the shading into
-  // the specified slice of the texture and can be used to 
+  // the specified slice of the texture and can be used to
   // implemement volumetric algorithms.  Iterated algorithms
   // can be done fully on the GPU by swapping textures between
   // active units and draw targets.
@@ -95,10 +104,12 @@ public:
   void AttachAsDrawTarget(int layer=0, int attachement=0, int attachmentIndex=0);
 
   // Description:
-  // TODO
   // Read the texture data back into the image data
   // (assumes it has been written as a target)
-  //void Get();
+  // Warning: probably best to only use this to read back into the same buffer that was used
+  // when the data was uploaded (i.e. this will assume that the vtkImageData buffer pointer
+  // is the right size for the data).
+  void ReadBack();
 
   // Description:
   // TODO: options for min and mag filter, wrapping...
@@ -107,10 +118,6 @@ protected:
   vtkOpenGLTextureImage();
   ~vtkOpenGLTextureImage();
 
-  // Description:
-  // Creates/transfers image data to texture if needed.
-  bool UpdateTexture();
-
 private:
   vtkOpenGLTextureImage(const vtkOpenGLTextureImage&);  // Not implemented.
   void operator=(const vtkOpenGLTextureImage&);  // Not implemented.
@@ -118,6 +125,7 @@ private:
   vtkOpenGLShaderComputation *ShaderComputation;
   vtkImageData *ImageData;
   vtkTypeUInt32 TextureName;
+  int Interpolate;
   unsigned long TextureMTime;
 
 };

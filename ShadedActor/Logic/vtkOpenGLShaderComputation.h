@@ -61,7 +61,8 @@ public:
   // Perform the actual computation
   // Updates the program if needed and then
   // renders to the current framebuffer configuration
-  void Compute();
+  // Slice will be passed as a uniform float
+  void Compute(float slice=0.);
 
   // Description:
   // Copy the framebuffer pixels into the result image

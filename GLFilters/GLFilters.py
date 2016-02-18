@@ -385,6 +385,6 @@ class GLFiltersTest(ScriptedLoadableModuleTest):
     volumesLogic = slicer.modules.volumes.logic()
     outputVolume = volumesLogic.CloneVolume(slicer.mrmlScene, inputVolume, "FA-filtered")
     logic = GLFiltersLogic()
-    self.assertIsNotNone( volumeNode )
+    self.assertIsNotNone( outputVolume )
     logic.run(inputVolume, outputVolume, 0.05)
     self.delayDisplay('Test passed!')

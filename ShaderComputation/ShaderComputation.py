@@ -857,6 +857,7 @@ class SceneRenderer(object):
     self.imageViewer = vtk.vtkImageViewer()
     self.imageViewer.SetColorLevel(128)
     self.imageViewer.SetColorWindow(256)
+    self.imageViewer.SetPosition(20, 600)
 
     self.transformPointSource = "" ;# TODO: this is just an example
     self.volumePropertyNode = None
@@ -1431,10 +1432,11 @@ class ShaderComputationTest(ScriptedLoadableModuleTest):
   def amigoMRUSPreIntraData(self):
     preopT2orig = 'https://docs.google.com/uc?authuser=1&id=0Bygzw56l1ZC-Q0dCLThIelVVaFE&export=download'
     preopT2smooth = 'https://docs.google.com/uc?authuser=1&id=0Bygzw56l1ZC-Q0dCLThIelVVaFE&export=download'
-    preopT2smoothN4 = 'https://drive.google.com/drive/u/0/folders/0Bygzw56l1ZC-QzBkYktZa3RhazA'
+    preopT2smoothN4 = 'https://docs.google.com/uc?authuser=1&id=0Bygzw56l1ZC-NGItT3BfMGw0NjQ&export=download'
+    intraUS = 'https://docs.google.com/uc?authuser=1&id=0Bygzw56l1ZC-MGVUX2QyRllPcW8&export=download'
     source = ( 'MR-US Neuro PreIntra',
-              ('https://docs.google.com/uc?authuser=1&id=0Bygzw56l1ZC-UmhGUk51NXdpZ3M&export=download',
-               preopT2smoothN4
+              ( intraUS,
+                preopT2smooth,
               ),
               ('intra-US.nrrd', 'preop-T2-smooth.nrrd'),
               ('intra-US','preop-T2')

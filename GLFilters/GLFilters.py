@@ -97,10 +97,10 @@ class GLFiltersWidget(ScriptedLoadableModuleWidget):
     # threshold value
     #
     self.imageThresholdSliderWidget = ctk.ctkSliderWidget()
-    self.imageThresholdSliderWidget.singleStep = 0.01
+    self.imageThresholdSliderWidget.singleStep = 0.5
     self.imageThresholdSliderWidget.minimum = 0
-    self.imageThresholdSliderWidget.maximum = .1
-    self.imageThresholdSliderWidget.value = 0.01
+    self.imageThresholdSliderWidget.maximum = 5.
+    self.imageThresholdSliderWidget.value = 0.5
     self.imageThresholdSliderWidget.setToolTip("Set threshold value for computing the output image. Voxels that have intensities lower than this value will set to zero.")
     parametersFormLayout.addRow("Image threshold", self.imageThresholdSliderWidget)
 
@@ -143,10 +143,15 @@ class GLFilter(object):
       TODO: this could factor out into a helper file
       TODO: multiple input filter examples
       TODO: iterative filters with scratch textures
-      TODO: compute directly into a texture being rendered by SceneRenderer
+      TODO: compute directly into a texture being rendered by SceneShader
   """
 
   def __init__(self, inputVolumes, outputVolume):
+    """Configure outputVolume and an iterationVolume to match
+    the first inputVolume."""
+
+    self.inputVolumes = inputVolumes
+    self.outputVolume = outputVolume
 
     if len(inputVolumes) < 1:
       raise "Must have at least one input volume"
@@ -154,43 +159,23 @@ class GLFilter(object):
     if not self.volume0.GetImageData():
       raise "Must have a valid input volume with image data"
 
-    self.outputVolume = outputVolume
+    # TODO: caller should be required to specify all scratch volumes
+    iterationName = '%s-iteration' % self.outputVolume.GetName()
+    self.iterationVolume = slicer.util.getNode(iterationName)
+    if not self.iterationVolume:
+      self.iterationVolume = slicer.vtkMRMLScalarVolumeNode()
+      self.iterationVolume.SetName(iterationName)
+      slicer.mrmlScene.AddNode(self.iterationVolume)
 
-    self.shaderComputation=vtkOpenGLShaderComputation()
-
-    import ShaderComputation
-    self.volumeTextures = []
-    for volume in inputVolumes:
-      textureUnit = len(self.volumeTextures)
-      volumeTexture = ShaderComputation.VolumeTexture(
-                                          self.shaderComputation,
-                                          textureUnit,
-                                          volume)
-      self.volumeTextures.append(volumeTexture)
-
-    # prepare output
     rasToIJK = vtk.vtkMatrix4x4()
     self.volume0.GetRASToIJKMatrix(rasToIJK)
-    self.outputVolume.SetRASToIJKMatrix(rasToIJK)
-    self.outputVolume.SetAndObserveTransformNodeID(self.volume0.GetTransformNodeID())
-
-    self.iterationVolumeTextures = []
-    for iteration in range(2):
-      iterationImage = vtk.vtkImageData()
-      iterationImage.SetDimensions(self.volume0.GetImageData().GetDimensions())
-      iterationImage.AllocateScalars(vtk.VTK_UNSIGNED_CHAR, 4)
-      # use the outputVolume for both iteration images
-      # so they have the same transforms, lookup tables, etc.
-      self.outputVolume.SetAndObserveImageData(iterationImage)
-      textureUnit = len(self.volumeTextures)
-      iterationVolumeTexture = ShaderComputation.VolumeTexture(
-                                          self.shaderComputation,
-                                          textureUnit,
-                                          outputVolume,
-                                          optimizeDynamicRange=False)
-      self.iterationVolumeTextures.append(iterationVolumeTexture)
-    self.shaderComputation.SetResultImageData(iterationImage)
-    self.shaderComputation.AcquireResultRenderbuffer()
+    for volume in [self.iterationVolume, self.outputVolume]:
+      volume.SetRASToIJKMatrix(rasToIJK)
+      volume.SetAndObserveTransformNodeID(self.volume0.GetTransformNodeID())
+      image = vtk.vtkImageData()
+      image.SetDimensions(self.volume0.GetImageData().GetDimensions())
+      image.AllocateScalars(vtk.VTK_UNSIGNED_CHAR, 4) # TODO: needs to be RGBA for rendering
+      volume.SetAndObserveImageData(image)
 
     self.header = """
       #version 120
@@ -200,64 +185,97 @@ class GLFilter(object):
         return samplePoint; // identity
       }
     """
-    # need to declare each texture unit as a uniform passed in
-    # from the host code; these are done in the vtkOpenGLTextureImage instances
-    self.header += "uniform sampler3D "
-    textureUnitCount = len(self.volumeTextures) + len(self.iterationVolumeTextures)
-    for textureUnit in range(textureUnitCount):
-      self.header += "textureUnit%d," % textureUnit
-    self.header = self.header[:-1] + ';'
 
-  def iteration(self, targetTextureImage):
+    self.vertexShaderTemplate = """
+      #version 120
+      attribute vec3 vertexAttribute;
+      attribute vec2 textureCoordinateAttribute;
+      varying vec3 interpolatedTextureCoordinate;
+      void main()
+      {
+        interpolatedTextureCoordinate = vec3(textureCoordinateAttribute, .5);
+        gl_Position = vec4(vertexAttribute, 1.);
+      }
+    """
+
+    self.readBackToVolumeNode = False
+    self.dummyImage = vtk.vtkImageData()
+    self.dummyImage.SetDimensions(5,5,5)
+    self.dummyImage.AllocateScalars(vtk.VTK_SHORT, 1)
+
+  def iteration(self, sceneShader, targetTextureImage):
     """Perform one whole-volume iteration of the algorithm into a target"""
+    sceneShader.shaderComputation.SetResultImageData(targetTextureImage.GetImageData())
+    sceneShader.shaderComputation.AcquireResultRenderbuffer()
     slices = self.volume0.GetImageData().GetDimensions()[2]
     for slice_ in range(slices):
       # draw into output texture TODO: move into VolumeTexture class
       targetTextureImage.AttachAsDrawTarget(0, slice_)
       # activate the textures
       for volumeTexture in self.volumeTextures:
-        volumeTexture.textureImage.Activate(volumeTexture.textureUnit)
+        if volumeTexture.textureImage != targetTextureImage:
+          volumeTexture.textureImage.Activate(volumeTexture.textureUnit)
       # perform the computation for this slice
-      self.shaderComputation.Compute(slice_ / (1. * slices))
+      sceneShader.shaderComputation.Compute(slice_ / (1. * slices))
 
   def compute(self, vertexShader, fragmentShader, keys={}, iterations=1):
     """Perform an iterated filter"""
+
     import time
     startTime = time.time()
+    logging.info('-'*40)
     logging.info('Processing started')
 
-    logging.info('%f shaders set' % (time.time() - startTime))
+    import ShaderComputation
+    sceneShader = ShaderComputation.SceneShader.getInstance()
+    sceneShader.resetFieldSamplers()
+    sceneShader.updateFieldSamplers()
+
+    volume0Texture = sceneShader.fieldSamplersByNodeID[self.volume0.GetID()]
+    outputTextures = {}
+    outputTextures[0] = sceneShader.fieldSamplersByNodeID[self.outputVolume.GetID()]
+    outputTextures[1] = sceneShader.fieldSamplersByNodeID[self.iterationVolume.GetID()]
+    self.volumeTextures = [volume0Texture,] + outputTextures.values()
+
+    logging.info('%f Acquired renderer' % (time.time() - startTime))
 
     for iteration in range(iterations):
       # build the source
       keys['iteration'] = iteration
       if iteration == 0:
-        keys['iterationTextureUnit'] = 'textureUnit0'
+        keys['inputTextureUnit'] = volume0Texture.textureUnit
+        keys['inputTextureUnitIdentifier'] = volume0Texture.textureUnitIdentifier()
       else:
-        keys['iterationTextureUnit'] = 'textureUnit' + str((iteration+1)%2)
-      self.shaderComputation.SetVertexShaderSource(vertexShader % keys)
-      samplersSource = ''
+        keys['inputTextureUnit'] = outputTextures[(iteration+1)%2].textureUnit
+        keys['inputTextureUnitIdentifier'] = outputTextures[(iteration+1)%2].textureUnitIdentifier()
+      sceneShader.shaderComputation.SetVertexShaderSource(vertexShader % keys)
+      samplersSource = sceneShader.textureUnitDeclarationSource()
       for volumeTexture in self.volumeTextures:
         samplersSource += volumeTexture.fieldSampleSource()
       shaders = self.header + samplersSource + fragmentShader
-      self.shaderComputation.SetFragmentShaderSource(shaders % keys)
+      sceneShader.shaderComputation.SetFragmentShaderSource(shaders % keys)
       # set the target
-      targetVolumeTexture = self.iterationVolumeTextures[iteration%2]
-      targetTextureImage = targetVolumeTexture.textureImage
-      self.iteration(targetTextureImage)
+      targetTextureImage = outputTextures[iteration%2].textureImage
+      self.iteration(sceneShader, targetTextureImage)
       logging.info('%f iteration %d' % (time.time() - startTime, iteration))
+      #print(sceneShader.shaderComputation.GetFragmentShaderSource())
+      #break
 
-    targetTextureImage.ReadBack()
+    sceneShader.render()
+    if True or self.readBackToVolumeNode:
+      targetTextureImage.ReadBack()
 
-    logging.info('%f readback finished' % (time.time() - startTime))
+      logging.info('%f readback finished' % (time.time() - startTime))
 
-    extractComponents = vtk.vtkImageExtractComponents()
-    extractComponents.SetInputData(targetTextureImage.GetImageData())
-    extractComponents.Update()
-    self.outputVolume.SetAndObserveImageData(extractComponents.GetOutputDataObject(0))
+      extractComponents = vtk.vtkImageExtractComponents()
+      extractComponents.SetInputData(targetTextureImage.GetImageData())
+      extractComponents.Update()
+      self.outputVolume.SetAndObserveImageData(extractComponents.GetOutputDataObject(0))
+    else:
+      sceneShader.render()
 
     logging.info('%f computation finished' % (time.time() - startTime))
-    logging.info('')
+    logging.info('-'*40)
 
 #
 # GLFiltersLogic
@@ -273,21 +291,9 @@ class GLFiltersLogic(ScriptedLoadableModuleLogic):
   https://github.com/Slicer/Slicer/blob/master/Base/Python/slicer/ScriptedLoadableModule.py
   """
 
-  def smoothFilter(self, inputVolume, outputVolume, sigma):
+  def identityFilter(self, inputVolume, outputVolume, sigma):
 
-    filter_ = GLFilter([inputVolume,], outputVolume)
-
-    vertexShaderTemplate = """
-      #version 120
-      attribute vec3 vertexAttribute;
-      attribute vec2 textureCoordinateAttribute;
-      varying vec3 interpolatedTextureCoordinate;
-      void main()
-      {
-        interpolatedTextureCoordinate = vec3(textureCoordinateAttribute, .5);
-        gl_Position = vec4(vertexAttribute, 1.);
-      }
-    """
+    glFilter = GLFilter([inputVolume,], outputVolume)
 
     fragmentShaderTemplate = """
       uniform float slice;
@@ -295,38 +301,71 @@ class GLFiltersLogic(ScriptedLoadableModuleLogic):
 
       void main()
       {
-        vec3 samplePoint = vec3(interpolatedTextureCoordinate.xy,slice);
+        vec3 stpPoint = vec3(interpolatedTextureCoordinate.xy,slice);
+        vec3 rasPoint = stpToRAS%(inputTextureUnit)s(stpPoint);
+        stpPoint = rasToSTP%(inputTextureUnit)s(rasPoint);
 
-        vec4 sum = vec4(0.);
-        for (int offsetX = -%(kernelSize)d; offsetX <= %(kernelSize)d; offsetX++) {
-          for (int offsetY = -%(kernelSize)d; offsetY <= %(kernelSize)d; offsetY++) {
-            for (int offsetZ = -%(kernelSize)d; offsetZ <= %(kernelSize)d; offsetZ++) {
-              vec3 offset = %(kernelSpacing)f * vec3(offsetX, offsetY, offsetZ);
-              vec4 sample = texture3D(%(iterationTextureUnit)s, samplePoint + offset);
-              sum += sample;
-            }
-          }
-        }
-
-        float sampleCount = pow(2. * (%(kernelSize)f + 1.), 3.);
-        gl_FragColor = vec4(vec3(sum/sampleCount), 1.);
+        gl_FragColor = vec4( vec3(texture3D(%(inputTextureUnitIdentifier)s, stpPoint).stp), 1. );
       }
     """
 
     keys = {
-      'kernelSize' : 5,
+      'kernelSize' : 1,
       'kernelSpacing' : sigma,
     }
 
-    filter_.compute(vertexShaderTemplate, fragmentShaderTemplate, keys, 10)
+    glFilter.compute(glFilter.vertexShaderTemplate, fragmentShaderTemplate, keys, 1)
 
-    return filter_
+    return glFilter
+
+  def smoothFilter(self, inputVolume, outputVolume, sigma):
+
+    glFilter = GLFilter([inputVolume,], outputVolume)
+
+    fragmentShaderTemplate = """
+      uniform float slice;
+      varying vec3 interpolatedTextureCoordinate;
+
+      void main()
+      {
+        vec3 stpPoint = vec3(interpolatedTextureCoordinate.xy,slice);
+        vec3 rasPoint = stpToRAS%(inputTextureUnit)s(stpPoint);
+
+        float sum = 0.;
+        for (int offsetX = -%(kernelSize)d; offsetX <= %(kernelSize)d; offsetX++) {
+          for (int offsetY = -%(kernelSize)d; offsetY <= %(kernelSize)d; offsetY++) {
+            for (int offsetZ = -%(kernelSize)d; offsetZ <= %(kernelSize)d; offsetZ++) {
+              vec3 offset = %(kernelSpacing)f * vec3(offsetX, offsetY, offsetZ);
+              vec3 stpSamplePoint = rasToSTP%(inputTextureUnit)s(rasPoint + offset);
+              sum += textureSampleDenormalized%(inputTextureUnit)s(%(inputTextureUnitIdentifier)s, stpSamplePoint);
+            }
+          }
+        }
+
+        float sampleCount = pow(2*%(kernelSize)f + 1., 3.);
+        float sample = sum/sampleCount;
+        float normalizedSample = normalizeSample%(inputTextureUnit)s(sample);
+        gl_FragColor = vec4(vec3(normalizedSample), 1.);
+        //gl_FragColor = vec4(vec3(stpPoint.x + stpPoint.y + stpPoint.z), 1.);
+        //gl_FragColor = vec4(vec3(texture3D(%(inputTextureUnitIdentifier)s, stpPoint).rgb), 1.);
+      }
+    """
+
+    keys = {
+      'kernelSize' : 1,
+      'kernelSpacing' : sigma,
+    }
+
+    glFilter.compute(glFilter.vertexShaderTemplate, fragmentShaderTemplate, keys, 1)
+
+    return glFilter
 
   def run(self, inputVolume, outputVolume, imageThreshold):
     """
     Run the actual algorithm
     """
-    self.filter_ = self.smoothFilter(inputVolume, outputVolume, imageThreshold)
+    #self.glFilter = self.identityFilter(inputVolume, outputVolume, imageThreshold)
+    self.glFilter = self.smoothFilter(inputVolume, outputVolume, imageThreshold)
 
     return True
 
@@ -349,7 +388,14 @@ class GLFiltersTest(ScriptedLoadableModuleTest):
     self.setUp()
     self.test_GLFilters1()
 
+
   def test_GLFilters1(self):
+    """Test a multi-input filter"""
+    import ShaderComputation
+    ShaderComputation.ShaderComputationTest().amigoMRUSPreIntraData()
+
+
+  def test_GLFilters2(self):
     """ Ideally you should have several levels of tests.  At the lowest level
     tests should exercise the functionality of the logic with different inputs
     (both valid and invalid).  At higher levels your tests should emulate the

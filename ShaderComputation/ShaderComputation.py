@@ -111,22 +111,32 @@ class ShaderComputationWidget(ScriptedLoadableModuleWidget):
     self.applyTransformCheckBox.setToolTip("If checked, render with transform applied.")
     parametersFormLayout.addRow("Apply Transform", self.applyTransformCheckBox)
 
+    #
+    # gradients from labelmaps
+    #
+    self.transferFunctionsFromLabelMaps = qt.QPushButton()
+    self.transferFunctionsFromLabelMaps.text = "Calculate Transfer Functions from Label Maps"
+    self.transferFunctionsFromLabelMaps.setToolTip("Calculate volume transfer functions from label map.")
+    parametersFormLayout.addRow(self.transferFunctionsFromLabelMaps)
+
     # connections
     self.renderSelector.connect("currentNodeChanged(vtkMRMLNode*)", self.onVolumeChange)
     self.transformAmplitude.connect("valueChanged(double)", self.onTransformChange)
     self.transformFrequency.connect("valueChanged(double)", self.onTransformChange)
     self.transformPhase.connect("valueChanged(double)", self.onTransformChange)
     self.applyTransformCheckBox.connect("toggled(bool)", self.onTransformChange)
+    self.transferFunctionsFromLabelMaps.connect("clicked()", self.onTransferFunctionsFromLabelmaps)
 
     # Add vertical spacer
     self.layout.addStretch(1)
 
     # set up the scene renderer
-    self.sceneRenderer = SceneRenderer()
-    self.sceneRenderer.transformPointSource = self.demoTransformPointSource()
+    self.sceneShader = SceneShader.getInstance()
 
   def cleanup(self):
-    self.sceneRenderer.cleanup()
+    self.sceneShader.cleanup()
+    del self.sceneShader
+    del slicer.modules.ShaderComputationSceneShader
 
   def demoTransformPointSource(self):
     return ("""
@@ -146,6 +156,29 @@ class ShaderComputationWidget(ScriptedLoadableModuleWidget):
         'phase' : self.phase
     })
 
+  def onTransferFunctionsFromLabelmaps(self):
+    import numpy.ma
+    labelMaps = slicer.util.getNodes('*-label')
+    for labelMapName in labelMaps.keys():
+      volumeNodeName = labelMapName[:-len('-label')]
+      volumeNode = slicer.util.getNode(volumeNodeName)
+      if volumeNode:
+        print('Building functions for %s' % volumeNodeName)
+        displayNode = ShaderComputationLogic().volumeRenderingDisplayNode(volumeNode)
+        volumePropertyNode = displayNode.GetVolumePropertyNode()
+        scalarOpacityFunction = volumePropertyNode.GetScalarOpacity(0)
+        gradientOpacityFunction = volumePropertyNode.GetGradientOpacity(0)
+        colorTransfer = volumePropertyNode.GetColor(0)
+
+        volumeArray = slicer.util.array(volumeNodeName)
+        labelArray = slicer.util.array(labelMapName)
+        start = max(labelArray.min(),1) # skip 0
+        end = labelArray.max()+1
+        for labelValue in range(start,end):
+          maskedArray = numpy.ma.masked_array(volumeArray, labelArray != labelValue)
+          print(labelValue, maskedArray.mean(), maskedArray.std())
+
+
   def onTransformChange(self):
     """Perform the render when any input changes"""
     self.amplitude = 0.
@@ -155,13 +188,13 @@ class ShaderComputationWidget(ScriptedLoadableModuleWidget):
       self.amplitude = self.transformAmplitude.value
       self.frequency = self.transformFrequency.value
       self.phase = self.transformPhase.value
-    self.sceneRenderer.transformPointSource = self.demoTransformPointSource()
-    self.sceneRenderer.render()
+    self.sceneShader.transformPointSource = self.demoTransformPointSource()
+    self.sceneShader.render()
 
   def onVolumeChange(self):
     """Perform the render when any input changes"""
-    self.sceneRenderer.setVolume(self.renderSelector.currentNode())
-    self.sceneRenderer.render()
+    self.sceneShader.setVolume(self.renderSelector.currentNode())
+    self.sceneShader.render()
 
 
 from slicer.util import VTKObservationMixin
@@ -270,6 +303,10 @@ class FieldSampler(object):
     self.shaderComputation = shaderComputation
     self.textureUnit = textureUnit
     self.node = node
+
+  def textureUnitIdentifier(self):
+    """The GLSL identifier associated with this texture unit (cannot be a variable)"""
+    return "textureUnit%d" % self.textureUnit
 
   def checkResources(self):
     """TODO: look at the data and determine how much of the available OpenGL
@@ -469,6 +506,7 @@ class VolumeTexture(FieldSampler):
     rasToSTP = vtk.vtkMatrix4x4()
     ijkToSTP.Multiply4x4(ijkToSTP, rasToIJK, rasToSTP)
 
+    # mapping from patient space (mm, RAS) to texture space (0-1, STP)
     parameters = {}
     rows = ('rasToS', 'rasToT', 'rasToP')
     for row in range(3):
@@ -500,6 +538,19 @@ class VolumeTexture(FieldSampler):
         # write in column-major order for glsl mat3 constructor
         parameters['normalSTPToRAS'] += "%f," % normalSTPToRAS.GetElement(row,column)
     parameters['normalSTPToRAS'] = parameters['normalSTPToRAS'][:-1] # clear trailing comma
+
+    # mapping from texture space (0-1, STP) to patient space (mm, RAS)
+    stpToRAS = vtk.vtkMatrix4x4()
+    stpToRAS.DeepCopy(rasToSTP)
+    stpToRAS.Invert()
+    rows = ('stpToR', 'stpToA', 'stpToS')
+    for row in range(3):
+      rowKey = rows[row]
+      parameters[rowKey] = ""
+      for col in range(4):
+        element = stpToRAS.GetElement(row,col)
+        parameters[rowKey] += "%f," % element
+      parameters[rowKey] = parameters[rowKey][:-1] # clear trailing comma
 
     return parameters
 
@@ -635,25 +686,6 @@ class VolumeTexture(FieldSampler):
     Function names are postpended with texure unit number to avoid name clashes.
     """
 
-    displayNode = ShaderComputationLogic().volumeRenderingDisplayNode(self.node)
-    if displayNode.GetVisibility() == 0:
-      return """
-        void transferFunction%(textureUnit)s(
-            const in float sample, const in float gradientMagnitude,
-            out vec3 color, out float opacity) {
-          color = vec3(0);
-          opacity = 0;
-        }
-        void sampleVolume%(textureUnit)s(
-            const in sampler3D volumeTextureUnit,
-            const in vec3 samplePointIn, const in float gradientSize,
-            out float sample, out vec3 normal, out float gradientMagnitude) {
-          sample = 0;
-          normal = vec3(0,0,0);
-          gradientMagnitude = 0;
-      }
-      """ % { 'textureUnit': self.textureUnit }
-
     transferFunctionSource = self.transferFunctionSource()
 
     sampleVolumeParameters = self.sampleVolumeParameters()
@@ -663,28 +695,71 @@ class VolumeTexture(FieldSampler):
           'textureUnit' : self.textureUnit,
     })
     fieldSampleSource = """
-      float textureSampleDenormalized%(textureUnit)s(const in sampler3D volumeTextureUnit, const in vec3 stpPoint) {
-        return ( texture3D(volumeTextureUnit, stpPoint).r * %(sampleUnscale)f + %(sampleUnshift)f );
+      float normalizeSample%(textureUnit)s(const in float sample) {
+        return ( (sample - %(sampleUnshift)f) / %(sampleUnscale)f );
       }
 
-      void sampleVolume%(textureUnit)s(const in sampler3D volumeTextureUnit, const in vec3 samplePointIn, const in float gradientSize,
-                        out float sample, out vec3 normal, out float gradientMagnitude)
-      {
+      float denormalizeSample%(textureUnit)s(const in float sample) {
+        return ( sample * %(sampleUnscale)f + %(sampleUnshift)f );
+      }
 
-        // TODO: transform should be applied to each sample in the gradient estimation
-        //       so that gradient is calculated incorporating transform.
-        vec3 samplePoint = transformPoint(samplePointIn);
+      float textureSampleDenormalized%(textureUnit)s(const in sampler3D volumeTextureUnit, const in vec3 stpPoint) {
+        return ( denormalizeSample%(textureUnit)s(texture3D(volumeTextureUnit, stpPoint).r) );
+      }
 
+      vec3 rasToSTP%(textureUnit)s(const in vec3 ras) {
         // vectors to map RAS to stp
         vec4 rasToS =  vec4( %(rasToS)s );
         vec4 rasToT =  vec4( %(rasToT)s );
         vec4 rasToP =  vec4( %(rasToP)s );
 
         vec3 stpPoint;
-        vec4 sampleCoordinate = vec4(samplePoint, 1.);
-        stpPoint.s = dot(rasToS,sampleCoordinate);
-        stpPoint.t = dot(rasToT,sampleCoordinate);
-        stpPoint.p = dot(rasToP,sampleCoordinate);
+        vec4 homogeneousRAS = vec4(ras, 1.);
+        stpPoint.s = dot(rasToS,homogeneousRAS);
+        stpPoint.t = dot(rasToT,homogeneousRAS);
+        stpPoint.p = dot(rasToP,homogeneousRAS);
+        return stpPoint;
+      }
+
+      vec3 stpToRAS%(textureUnit)s(const in vec3 stp) {
+        // vectors to map stp to ras
+        vec4 stpToR =  vec4( %(stpToR)s );
+        vec4 stpToA =  vec4( %(stpToA)s );
+        vec4 stpToS =  vec4( %(stpToS)s );
+
+        vec3 rasPoint;
+        vec4 homogeneousSTP = vec4(stp, 1.);
+        rasPoint.x = dot(stpToR,homogeneousSTP);
+        rasPoint.y = dot(stpToA,homogeneousSTP);
+        rasPoint.z = dot(stpToS,homogeneousSTP);
+        return rasPoint;
+      }
+    """ % sampleVolumeParameters
+
+    displayNode = ShaderComputationLogic().volumeRenderingDisplayNode(self.node)
+    if displayNode.GetVisibility() == 0:
+      fieldSampleSource += """
+        void sampleVolume%(textureUnit)s(
+            const in sampler3D volumeTextureUnit,
+            const in vec3 samplePointIn, const in float gradientSize,
+            out float sample, out vec3 normal, out float gradientMagnitude) {
+          sample = 0;
+          normal = vec3(0,0,0);
+          gradientMagnitude = 0;
+      }
+      """ % { 'textureUnit': self.textureUnit }
+    else:
+      fieldSampleSource += """
+      void sampleVolume%(textureUnit)s(
+          const in sampler3D volumeTextureUnit, 
+          const in vec3 samplePointIn, const in float gradientSize,
+          out float sample, out vec3 normal, out float gradientMagnitude) {
+
+        // TODO: transform should be applied to each sample in the gradient estimation
+        //       so that gradient is calculated incorporating transform.
+        vec3 samplePoint = transformPoint(samplePointIn);
+
+        vec3 stpPoint = rasToSTP%(textureUnit)s(samplePoint);
 
         if (any(lessThan(stpPoint, vec3(0))) || any(greaterThan(stpPoint,vec3(1)))) {
             sample = 0;
@@ -726,117 +801,18 @@ class VolumeTexture(FieldSampler):
 
     return transferFunctionSource + fieldSampleSource
 
-class LabelMapTexture(VolumeTexture):
-  """Most of the functionality is inherited, but a special sampler is used"""
-
-  def __init__(self, shaderComputation, textureUnit, volumeNode):
-    FieldSampler.__init__(self, shaderComputation, textureUnit, volumeNode)
-    try:
-      from vtkSlicerShadedActorModuleLogicPython import vtkOpenGLTextureImage
-    except ImportError:
-      import vtkAddon
-      vtkOpenGLTextureImage=vtkAddon.vtkOpenGLTextureImage
-    self.textureImage=vtkOpenGLTextureImage()
-    self.textureImage.SetShaderComputation(self.shaderComputation)
-    self.textureImage.SetInterpolate(0)
-
-  def transferFunctionSource(self):
-    """Create source code for transfer function that maps
-    a sample and gradient to a color and opacity based on
-    the passed volumePropertyNode.
-    """
-    # TODO: need to make the label map lookup table
-    source = """
-    void transferFunction%(textureUnit)s(const in float sample, const in float gradientMagnitude /* TODO: not used */,
-                          out vec3 color, out float opacity)
-    {
-       color = vec3(1,0,0);
-       opacity = sample;
-    }
-    """ % { 'textureUnit' : self.textureUnit }
-    return source
-
-  def fieldSampleSource(self):
-    """Return the GLSL code to sample our volume in space
-    Function names are postpended with texure unit number to avoid name clashes.
-    """
-
-    transferFunctionSource = self.transferFunctionSource()
-
-    # TODO:
-    # - set neighbors to zero/one depending of they are equal to sample value for gradient
-    # - refactor VolumeTexture so we don't repeat here
-    # - make a transfer function for color table
-    # TODO: need a procedural blend option (cvg-style)
-    # TODO: calculate ras bounds for all objects
-    sampleVolumeParameters = self.sampleVolumeParameters()
-    sampleVolumeParameters.update({
-          'sampleUnshift' : self.sampleUnshift,
-          'sampleUnscale' : self.sampleUnscale,
-          'textureUnit' : self.textureUnit,
-    })
-    fieldSampleSource = """
-      float textureSampleDenormalized%(textureUnit)s(const in sampler3D volumeTextureUnit, const in vec3 stpPoint) {
-        return ( texture3D(volumeTextureUnit, stpPoint).r * %(sampleUnscale)f + %(sampleUnshift)f );
-      }
-
-      void sampleVolume%(textureUnit)s(const in sampler3D volumeTextureUnit, const in vec3 samplePointIn, const in float gradientSize,
-                        out float sample, out vec3 normal, out float gradientMagnitude)
-      {
-
-        // TODO: transform should be applied to each sample in the gradient estimation
-        //       so that gradient is calculated incorporating transform.
-        vec3 samplePoint = transformPoint(samplePointIn);
-
-        // vectors to map RAS to stp
-        vec4 rasToS =  vec4( %(rasToS)s );
-        vec4 rasToT =  vec4( %(rasToT)s );
-        vec4 rasToP =  vec4( %(rasToP)s );
-
-        vec3 stpPoint;
-        vec4 sampleCoordinate = vec4(samplePoint, 1.);
-        stpPoint.s = dot(rasToS,sampleCoordinate);
-        stpPoint.t = dot(rasToT,sampleCoordinate);
-        stpPoint.p = dot(rasToP,sampleCoordinate);
-
-        #define S(point) textureSampleDenormalized%(textureUnit)s(volumeTextureUnit, point)
-
-        // read from 3D texture
-        sample = S(stpPoint);
-
-        // central difference sample gradient (P is +1, N is -1)
-        float sP00 = S(stpPoint + vec3(%(mmToS)f * gradientSize,0,0));
-        float sN00 = S(stpPoint - vec3(%(mmToS)f * gradientSize,0,0));
-        float s0P0 = S(stpPoint + vec3(0,%(mmToT)f * gradientSize,0));
-        float s0N0 = S(stpPoint - vec3(0,%(mmToT)f * gradientSize,0));
-        float s00P = S(stpPoint + vec3(0,0,%(mmToP)f * gradientSize));
-        float s00N = S(stpPoint - vec3(0,0,%(mmToP)f * gradientSize));
-
-        #undef S
-
-        // TODO: add Sobel option to filter gradient
-        // https://en.wikipedia.org/wiki/Sobel_operator#Extension_to_other_dimensions
-
-        vec3 gradient = vec3( (sP00-sN00),
-                              (s0P0-s0N0),
-                              (s00P-s00N) );
-
-        gradientMagnitude = length(gradient);
-
-        // https://en.wikipedia.org/wiki/Normal_(geometry)#Transforming_normals
-        mat3 normalSTPToRAS = mat3(%(normalSTPToRAS)s);
-        vec3 localNormal;
-        localNormal = (-1. / gradientMagnitude) * gradient;
-        normal = normalize(normalSTPToRAS * localNormal);
-      }
-    """ % sampleVolumeParameters
-    return transferFunctionSource + fieldSampleSource
-
-class SceneRenderer(object):
+class SceneShader(object):
   """A class to render the current mrml scene as using shader computation"""
 
+  @staticmethod
+  def getInstance():
+    """Return a singleton instance of the scene renderer"""
+    if not hasattr(slicer.modules, "ShaderComputationSceneShader"):
+      slicer.modules.ShaderComputationSceneShader = SceneShader()
+    return slicer.modules.ShaderComputationSceneShader
+
   def __init__(self, scene=None):
-    """ Do whatever is needed to reset the state - typically a scene clear will be enough.
+    """ Creates the scene renderer internals and starts observing the scene
     """
     self.volumeTexture = None
     self.logic = ShaderComputationLogic()
@@ -851,6 +827,7 @@ class SceneRenderer(object):
 
     self.resultImage = vtk.vtkImageData()
     self.resultImage.SetDimensions(512, 512, 1)
+    self.resultImage.SetDimensions(1024, 1024, 1)
     self.resultImage.AllocateScalars(vtk.VTK_UNSIGNED_CHAR, 4)
     self.shaderComputation.SetResultImageData(self.resultImage)
 
@@ -859,7 +836,12 @@ class SceneRenderer(object):
     self.imageViewer.SetColorWindow(256)
     self.imageViewer.SetPosition(20, 600)
 
-    self.transformPointSource = "" ;# TODO: this is just an example
+    self.transformPointSource = """
+      vec3 transformPoint(const in vec3 samplePoint)
+      {
+          return samplePoint; // identity by default
+      }
+    """
     self.volumePropertyNode = None
 
     # map of node IDs to instances of FieldSampler subclasses
@@ -884,8 +866,12 @@ class SceneRenderer(object):
     self._renderPending = False
     self._active = True # ignore events when not active
 
+    # TODO: generalize for filtering
+    self.render() # go ahead and start the process
+
   def cleanup(self):
-    self.sceneObserver.removeObservers()
+    if self.sceneObserver:
+      self.sceneObserver.removeObservers()
     self.sceneObserver = None
     self.volumeTexture = None
     self.shaderComputation = None
@@ -922,8 +908,20 @@ class SceneRenderer(object):
     logging.error('no texture units available')
     return -1
 
+  def resetFieldSamplers(self):
+    """Free up all texture allocations so they will
+    be recreated on the next call to updateFieldSamplers"""
+    for id_ in self.fieldSamplersByNodeID.keys():
+      del(self.fieldSamplersByNodeID[id_])
+      print(id_, 'removed')
+    self.fieldSamplersByNodeID = {}
+
   def updateFieldSamplers(self):
-    """For now, hard code the mapping from nodes to FieldSampler, but eventually
+    """
+    Keep track of one FieldSampler instance per node of the corresponding type.
+    Create a new sampler if needed, or delete ones that are no longer
+    in the scene.
+    For now, hard code the mapping from nodes to FieldSampler, but eventually
     consider making plugins that handle various node types"""
     if not self._active:
       return
@@ -942,11 +940,6 @@ class SceneRenderer(object):
           mappedNodeIDs.append(id_)
           print(id_, node.GetName(), 'mapped as', textureUnit)
         # TODO: implement label map field
-        if False and node.GetClassName() == 'vtkMRMLLabelMapVolumeNode':
-          textureUnit = self.getFreeTextureUnit()
-          self.fieldSamplersByNodeID[id_] = LabelMapTexture(self.shaderComputation, textureUnit, node)
-          mappedNodeIDs.append(id_)
-          print(id_, node.GetName(), 'mapped as', textureUnit)
         elif node.GetClassName() == 'vtkMRMLMarkupsFiducialNode':
           textureUnit = self.getFreeTextureUnit()
           self.fieldSamplersByNodeID[id_] = Fiducials(self.shaderComputation, textureUnit, node)
@@ -1002,6 +995,15 @@ class SceneRenderer(object):
     return fieldCompositeSource
 
 
+  def textureUnitDeclarationSource(self):
+    # need to declare each texture unit as a uniform passed in
+    # from the host code; these are done in the vtkOpenGLTextureImage instances
+    textureUnitDeclaration = "uniform sampler3D "
+    for fieldSampler in self.fieldSamplersByNodeID.values():
+      textureUnitDeclaration += fieldSampler.textureUnitIdentifier() + ","
+    textureUnitDeclaration = textureUnitDeclaration[:-1] + ';'
+    return textureUnitDeclaration
+
   def render(self):
     """Perform the actual render operation by pulling together all
     the elements of the shader program and ensuring the data is up to
@@ -1022,13 +1024,6 @@ class SceneRenderer(object):
 
     for fieldSampler in self.fieldSamplersByNodeID.values():
       fieldSampler.updateFromMRML()
-
-    # need to declare each texture unit as a uniform passed in
-    # from the host code; these are done in the vtkOpenGLTextureImage instances
-    textureUnitDeclaration = "uniform sampler3D "
-    for fieldSampler in self.fieldSamplersByNodeID.values():
-      textureUnitDeclaration += "textureUnit%d," % fieldSampler.textureUnit
-    textureUnitDeclaration = textureUnitDeclaration[:-1] + ';'
 
     if not self.volumeTexture:
       volumeNode = slicer.util.getNode('vtkMRMLScalarVolumeNode*')
@@ -1058,7 +1053,7 @@ class SceneRenderer(object):
       }
     """ % {
       'header' : self.logic.headerSource(),
-      'textureUnitDeclaration' : textureUnitDeclaration,
+      'textureUnitDeclaration' : self.textureUnitDeclarationSource(),
       'intersectBox' : self.logic.intersectBoxSource(),
       'transformPoint' : self.transformPointSource,
       'fieldSamplers' : self.fieldSamplersSource(),
@@ -1105,17 +1100,21 @@ class ShaderComputationLogic(ScriptedLoadableModuleLogic):
     """Get the display node or create a new one if missing"""
     displayNode = None
     displayNodeCount = volumeNode.GetNumberOfDisplayNodes()
+    if displayNodeCount == 0:
+      volumeNode.CreateDefaultDisplayNodes()
     for displayNodeIndex in range(displayNodeCount):
       thisDisplayNode = volumeNode.GetNthDisplayNode(displayNodeIndex)
-      if thisDisplayNode.GetClassName() == 'vtkMRMLGPURayCastVolumeRenderingDisplayNode':
+      if thisDisplayNode and thisDisplayNode.GetClassName() == 'vtkMRMLGPURayCastVolumeRenderingDisplayNode':
           displayNode = thisDisplayNode
     if not displayNode:
-      displayNode = ShaderComputationLogic().createVolumeDisplayNode(volumeNode, (1,1,1))
+      displayNode = ShaderComputationLogic().createVolumeDisplayNode(volumeNode)
+    if not self.volumeDisplayInitialized(displayNode):
+      self.parametricVolumeProperty(volumeNode,displayNode)
     return displayNode
 
   def createVolumeDisplayNode(self,volumeNode,baseColor=(1,1,1)):
-    """Adds a volume rendering display node to a volume node"""
-
+    """Adds a volume rendering display node to a volume node.
+    """
     # create the volume property node with default transfer functions
     volumePropertyNode = slicer.vtkMRMLVolumePropertyNode()
     volumePropertyNode.SetName(volumeNode.GetName() + '-VP')
@@ -1134,8 +1133,18 @@ class ShaderComputationLogic(ScriptedLoadableModuleLogic):
     displayNode.SetAndObserveVolumeNodeID(volumeNode.GetID())
     slicer.mrmlScene.AddNode(displayNode)
     volumeNode.AddAndObserveDisplayNodeID(displayNode.GetID())
+    self.parametricVolumeProperty(volumeNode, displayNode, baseColor)
+    return displayNode
 
-    # guess the transfer function based on the volume data
+  def volumeDisplayInitialized(self,displayNode):
+    """See if volume display node is non-default"""
+    volumePropertyNode = displayNode.GetVolumePropertyNode()
+    scalarOpacity = volumePropertyNode.GetScalarOpacity()
+    return scalarOpacity.GetRange() != (0.0, 0.0)
+
+  def parametricVolumeProperty(self,volumeNode, displayNode, baseColor=(1,1,1)):
+    """Guess the transfer function based on the volume data"""
+    volumePropertyNode = slicer.util.getNode(displayNode.GetVolumePropertyNodeID())
     scalarRange = volumeNode.GetImageData().GetScalarRange()
     rangeWidth = scalarRange[1] - scalarRange[0]
     rangeCenter = scalarRange[0] + rangeWidth * 0.5
@@ -1144,22 +1153,25 @@ class ShaderComputationLogic(ScriptedLoadableModuleLogic):
             (rangeCenter - 0.1 * rangeWidth, 0.),
             (rangeCenter + 0.1 * rangeWidth, 1.),
             (scalarRange[1], 1.) )
+    scalarOpacity = volumePropertyNode.GetScalarOpacity()
     for point in scalarOpacityPoints:
       scalarOpacity.AddPoint(*point)
     gradientOpacityPoints = (
             (0, 0.),
             (rangeCenter - 0.1 * rangeWidth, 0.),
-            (rangeCenter + 0.1 * rangeWidth, 1.),
-            (scalarRange[1], 1.) )
+            (rangeCenter - 0.09 * rangeWidth, 1.),
+            (rangeCenter + 0.09 * rangeWidth, 1.),
+            (rangeCenter + 0.1 * rangeWidth, 0.),
+            (scalarRange[1], 0.) )
+    gradientOpacity = volumePropertyNode.GetGradientOpacity()
     for point in gradientOpacityPoints:
       gradientOpacity.AddPoint(*point)
     colorPoints = (
             (scalarRange[0], baseColor),
             (scalarRange[1], baseColor) )
+    colorTransfer = volumePropertyNode.GetColor()
     for intensity,rgb in colorPoints:
       colorTransfer.AddRGBPoint(intensity, *rgb)
-
-    return displayNode
 
   def headerSource(self):
     return ("""
@@ -1435,11 +1447,11 @@ class ShaderComputationTest(ScriptedLoadableModuleTest):
     preopT2smoothN4 = 'https://docs.google.com/uc?authuser=1&id=0Bygzw56l1ZC-NGItT3BfMGw0NjQ&export=download'
     intraUS = 'https://docs.google.com/uc?authuser=1&id=0Bygzw56l1ZC-MGVUX2QyRllPcW8&export=download'
     source = ( 'MR-US Neuro PreIntra',
-              ( intraUS,
-                preopT2smooth,
+              ( preopT2smooth,
+                intraUS,
               ),
-              ('intra-US.nrrd', 'preop-T2-smooth.nrrd'),
-              ('intra-US','preop-T2')
+              ('preop-T2-smooth.nrrd', 'intra-US.nrrd',),
+              ('preop-T2','intra-US',)
             )
     import SampleData
     return SampleData.SampleDataLogic().downloadFromSource(SampleData.SampleDataSource(*source))
@@ -1448,8 +1460,8 @@ class ShaderComputationTest(ScriptedLoadableModuleTest):
     """Load MR and US data to emulate intraprocedural imaging"""
     # self.amigoMRUSData()
     nodes = self.amigoMRUSPreIntraData()
-    ShaderComputationLogic().createVolumeDisplayNode(nodes[0], (0,1,0))
-    ShaderComputationLogic().createVolumeDisplayNode(nodes[1], (1,1,1))
+    ShaderComputationLogic().createVolumeDisplayNode(nodes[0], (1,1,1))
+    ShaderComputationLogic().createVolumeDisplayNode(nodes[1], (0,1,0))
 
   def addFiducials(self):
     shaderFiducials = slicer.util.getNode('shaderFiducials')
@@ -1487,13 +1499,13 @@ class ShaderComputationTest(ScriptedLoadableModuleTest):
     your test should break so they know that the feature is needed.
     """
 
-    slicer.modules.ShaderComputationWidget.sceneRenderer.deactivate()
+    SceneShader.getInstance().deactivate()
     self.addDefaultVolumeProperty()
-    scenario = 'chest'
     scenario = 'amigo'
+    scenario = 'chest'
     if scenario == 'amigo':
       self.amigoScenario()
     else:
       self.addFiducials()
       self.addVolume()
-    slicer.modules.ShaderComputationWidget.sceneRenderer.activate()
+    SceneShader.getInstance().activate()

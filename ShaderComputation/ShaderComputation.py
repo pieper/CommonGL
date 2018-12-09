@@ -134,9 +134,11 @@ class ShaderComputationWidget(ScriptedLoadableModuleWidget):
     self.sceneShader = SceneShader.getInstance()
 
   def cleanup(self):
-    self.sceneShader.cleanup()
-    del self.sceneShader
-    del slicer.modules.ShaderComputationSceneShader
+    if self.sceneShader:
+      self.sceneShader.cleanup()
+      del self.sceneShader
+    if slicer.modules.ShaderComputationSceneShader:
+      del slicer.modules.ShaderComputationSceneShader
 
   def demoTransformPointSource(self):
     return ("""
@@ -217,11 +219,9 @@ class SceneObserver(VTKObservationMixin):
     self.addObserver(scene, scene.NodeAddedEvent, self.onNodeAdded)
     self.addObserver(scene, scene.NodeRemovedEvent, self.onNodeRemoved)
 
-    scene.InitTraversal()
-    node = scene.GetNextNode()
-    while node:
+    for nodeIndex in xrange(slicer.mrmlScene.GetNumberOfNodes()):
+      node = slicer.mrmlScene.GetNthNode(nodeIndex)
       self._observeNode(node)
-      node = scene.GetNextNode()
 
     # a dictionary of (nodeKey,eventKey) -> callback
     # where nodeKey is classname "vtkMRML{nodeKey}Node"
@@ -242,7 +242,7 @@ class SceneObserver(VTKObservationMixin):
       # use AnyEvent since it will catch events like TransformModified
       self.addObserver(node, vtk.vtkCommand.AnyEvent, self._onNodeModified)
     else:
-      raise('should not happen: non node is in scene')
+      raise Exception('should not happen: non node is in scene')
 
   @vtk.calldata_type(vtk.VTK_OBJECT)
   def onNodeAdded(self, caller, event, calldata):
@@ -704,7 +704,7 @@ class VolumeTexture(FieldSampler):
       }
 
       float textureSampleDenormalized%(textureUnit)s(const in sampler3D volumeTextureUnit, const in vec3 stpPoint) {
-        return ( denormalizeSample%(textureUnit)s(texture3D(volumeTextureUnit, stpPoint).r) );
+        return ( denormalizeSample%(textureUnit)s(texture(volumeTextureUnit, stpPoint).r) );
       }
 
       vec3 rasToSTP%(textureUnit)s(const in vec3 ras) {
@@ -814,7 +814,10 @@ class SceneShader(object):
   def __init__(self, scene=None):
     """ Creates the scene renderer internals and starts observing the scene
     """
+    self.sceneObserver = None
     self.volumeTexture = None
+
+
     self.logic = ShaderComputationLogic()
     try:
       from vtkSlicerShadedActorModuleLogicPython import vtkOpenGLShaderComputation
@@ -867,7 +870,7 @@ class SceneShader(object):
     self._active = True # ignore events when not active
 
     # TODO: generalize for filtering
-    self.render() # go ahead and start the process
+    # self.requestRender() # go ahead and start the process
 
   def cleanup(self):
     if self.sceneObserver:
@@ -927,9 +930,8 @@ class SceneShader(object):
       return
     self.updateAllocatedTextureUnits()
     mappedNodeIDs = []
-    slicer.mrmlScene.InitTraversal()
-    node = slicer.mrmlScene.GetNextNode()
-    while node:
+    for nodeIndex in xrange(slicer.mrmlScene.GetNumberOfNodes()):
+      node = slicer.mrmlScene.GetNthNode(nodeIndex)
       id_ = node.GetID()
       if id_ in self.fieldSamplersByNodeID.keys():
         mappedNodeIDs.append(id_)
@@ -945,12 +947,13 @@ class SceneShader(object):
           self.fieldSamplersByNodeID[id_] = Fiducials(self.shaderComputation, textureUnit, node)
           mappedNodeIDs.append(id_)
           print(id_, node.GetName(), 'mapped as', textureUnit)
-      node = slicer.mrmlScene.GetNextNode()
 
     for id_ in self.fieldSamplersByNodeID.keys():
       if not id_ in mappedNodeIDs:
         del(self.fieldSamplersByNodeID[id_])
         print(id_, 'removed')
+    if self.shaderComputation.GetErrorOccurred():
+      raise Exception("ShaderComputationError")
 
   def fieldSamplersSource(self):
     """Functions to sample all currently mapped nodes"""
@@ -1009,28 +1012,38 @@ class SceneShader(object):
     the elements of the shader program and ensuring the data is up to
     date on the GPU.  Compute the result and display in a window."""
 
+    step = 1
+    print('render step %d' % step); step += 1
     if not self._active:
       return
 
+    print('render step %d' % step); step += 1
     if not self.shaderComputation:
       logging.error("can't render without computation context")
       return
 
+    print('render step %d' % step); step += 1
+    self.shaderComputation.SetResultImageData(self.resultImage)
     self.updateFieldSamplers()
 
+    print('render step %d' % step); step += 1
     if len(self.fieldSamplersByNodeID.values()) == 0:
       logging.error ("can't render without fields")
       return
 
+    print('render step %d' % step); step += 1
     for fieldSampler in self.fieldSamplersByNodeID.values():
+      print('updating %s' % fieldSampler.node.GetName())
       fieldSampler.updateFromMRML()
 
+    print('render step %d' % step); step += 1
     if not self.volumeTexture:
       volumeNode = slicer.util.getNode('vtkMRMLScalarVolumeNode*')
       if not volumeNode:
         return
       self.volumeTexture = VolumeTexture(self.shaderComputation, 15, volumeNode)
 
+    print('render step %d' % step); step += 1
     rayCastParameters = self.logic.rayCastVolumeParameters(self.volumeTexture.node)
     rayCastParameters.update({
           'rayMaxSteps' : 100000,
@@ -1046,10 +1059,12 @@ class SceneShader(object):
       %(fieldSamplers)s
       %(rayCast)s
 
-      varying vec3 interpolatedTextureCoordinate;
+      in vec3 interpolatedTextureCoordinate;
+      out vec4 fragmentColor;
+
       void main()
       {
-        gl_FragColor = rayCast(interpolatedTextureCoordinate);
+        fragmentColor = rayCast(interpolatedTextureCoordinate);
       }
     """ % {
       'header' : self.logic.headerSource(),
@@ -1060,18 +1075,24 @@ class SceneShader(object):
       'rayCast' : rayCastSource,
     })
 
+    print('render step %d' % step); step += 1
     self.shaderComputation.AcquireResultRenderbuffer()
     self.shaderComputation.Compute()
     self.shaderComputation.ReadResult()
     self.shaderComputation.ReleaseResultRenderbuffer()
 
+    if self.shaderComputation.GetErrorOccurred():
+      raise Exception("ShaderComputationError")
+
+    print('render step %d' % step); step += 1
     # copy result to the image viewer
     self.imageViewer.SetInputData(self.resultImage)
     self.imageViewer.Render()
 
+    print('render step %d' % step); step += 1
     self._renderPending = False
 
-    if False:
+    if True:
       # print(self.shaderComputation.GetFragmentShaderSource())
       fp = open('/tmp/shader.glsl','w')
       fp.write(self.shaderComputation.GetFragmentShaderSource())
@@ -1129,7 +1150,7 @@ class ShaderComputationLogic(ScriptedLoadableModuleLogic):
     displayNode = slicer.vtkMRMLGPURayCastVolumeRenderingDisplayNode()
     displayNode.SetName(volumeNode.GetName() + '-VR')
     displayNode.SetAndObserveVolumePropertyNodeID(volumePropertyNode.GetID())
-    displayNode.SetVisibility(1)
+    displayNode.SetVisibility(0)
     displayNode.SetAndObserveVolumeNodeID(volumeNode.GetID())
     slicer.mrmlScene.AddNode(displayNode)
     volumeNode.AddAndObserveDisplayNodeID(displayNode.GetID())
@@ -1175,7 +1196,7 @@ class ShaderComputationLogic(ScriptedLoadableModuleLogic):
 
   def headerSource(self):
     return ("""
-      #version 120
+      #version 150
     """)
 
   def rayCastVolumeParameters(self,volumeNode):
@@ -1235,9 +1256,9 @@ class ShaderComputationLogic(ScriptedLoadableModuleLogic):
   def rayCastVertexShaderSource(self):
     return ("""
       %(header)s
-      attribute vec3 vertexAttribute;
-      attribute vec2 textureCoordinateAttribute;
-      varying vec3 interpolatedTextureCoordinate;
+      in vec3 vertexAttribute;
+      in vec2 textureCoordinateAttribute;
+      out vec3 interpolatedTextureCoordinate;
       void main()
       {
         interpolatedTextureCoordinate = vec3(textureCoordinateAttribute, .5);
@@ -1439,7 +1460,7 @@ class ShaderComputationTest(ScriptedLoadableModuleTest):
               ('intra-T2', 'intra-US','preop-T2', 'preop-US')
             )
     import SampleData
-    SampleData.SampleDataLogic().downloadFromSource(SampleData.SampleDataSource(*source))
+    return SampleData.SampleDataLogic().downloadFromSource(SampleData.SampleDataSource(*source))
 
   def amigoMRUSPreIntraData(self):
     preopT2orig = 'https://docs.google.com/uc?authuser=1&id=0Bygzw56l1ZC-Q0dCLThIelVVaFE&export=download'
@@ -1501,8 +1522,8 @@ class ShaderComputationTest(ScriptedLoadableModuleTest):
 
     SceneShader.getInstance().deactivate()
     self.addDefaultVolumeProperty()
-    scenario = 'amigo'
     scenario = 'chest'
+    scenario = 'amigo'
     if scenario == 'amigo':
       self.amigoScenario()
     else:

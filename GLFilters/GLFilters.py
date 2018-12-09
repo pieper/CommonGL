@@ -161,7 +161,10 @@ class GLFilter(object):
 
     # TODO: caller should be required to specify all scratch volumes
     iterationName = '%s-iteration' % self.outputVolume.GetName()
-    self.iterationVolume = slicer.util.getNode(iterationName)
+    try:
+      self.iterationVolume = slicer.util.getNode(iterationName)
+    except slicer.util.MRMLNodeNotFoundException:
+      self.iterationVolume = None
     if not self.iterationVolume:
       self.iterationVolume = slicer.vtkMRMLScalarVolumeNode()
       self.iterationVolume.SetName(iterationName)
@@ -178,7 +181,7 @@ class GLFilter(object):
       volume.SetAndObserveImageData(image)
 
     self.header = """
-      #version 120
+      #version 150
 
       vec3 transformPoint(const in vec3 samplePoint)
       {
@@ -187,14 +190,14 @@ class GLFilter(object):
     """
 
     self.vertexShaderTemplate = """
-      #version 120
-      attribute vec3 vertexAttribute;
-      attribute vec2 textureCoordinateAttribute;
-      varying vec3 interpolatedTextureCoordinate;
+      #version 150
+      in vec3 vertexCoordinate;
+      in vec2 textureCoordinate;
+      out vec3 interpolatedTextureCoordinate;
       void main()
       {
-        interpolatedTextureCoordinate = vec3(textureCoordinateAttribute, .5);
-        gl_Position = vec4(vertexAttribute, 1.);
+        interpolatedTextureCoordinate = vec3(textureCoordinate, .5);
+        gl_Position = vec4(vertexCoordinate, 1.);
       }
     """
 
@@ -228,7 +231,7 @@ class GLFilter(object):
 
     import ShaderComputation
     sceneShader = ShaderComputation.SceneShader.getInstance()
-    sceneShader.resetFieldSamplers()
+    #sceneShader.resetFieldSamplers()
     sceneShader.updateFieldSamplers()
 
     volume0Texture = sceneShader.fieldSamplersByNodeID[self.volume0.GetID()]
@@ -297,7 +300,8 @@ class GLFiltersLogic(ScriptedLoadableModuleLogic):
 
     fragmentShaderTemplate = """
       uniform float slice;
-      varying vec3 interpolatedTextureCoordinate;
+      in vec3 interpolatedTextureCoordinate;
+      out vec4 fragmentColor;
 
       void main()
       {
@@ -305,7 +309,7 @@ class GLFiltersLogic(ScriptedLoadableModuleLogic):
         vec3 rasPoint = stpToRAS%(inputTextureUnit)s(stpPoint);
         stpPoint = rasToSTP%(inputTextureUnit)s(rasPoint);
 
-        gl_FragColor = vec4( vec3(texture3D(%(inputTextureUnitIdentifier)s, stpPoint).stp), 1. );
+        fragmentColor = vec4( vec3(texture(%(inputTextureUnitIdentifier)s, stpPoint).stp), 1. );
       }
     """
 
@@ -324,7 +328,8 @@ class GLFiltersLogic(ScriptedLoadableModuleLogic):
 
     fragmentShaderTemplate = """
       uniform float slice;
-      varying vec3 interpolatedTextureCoordinate;
+      in vec3 interpolatedTextureCoordinate;
+      out vec4 fragmentColor;
 
       void main()
       {
@@ -345,9 +350,9 @@ class GLFiltersLogic(ScriptedLoadableModuleLogic):
         float sampleCount = pow(2*%(kernelSize)f + 1., 3.);
         float sample = sum/sampleCount;
         float normalizedSample = normalizeSample%(inputTextureUnit)s(sample);
-        gl_FragColor = vec4(vec3(normalizedSample), 1.);
-        //gl_FragColor = vec4(vec3(stpPoint.x + stpPoint.y + stpPoint.z), 1.);
-        //gl_FragColor = vec4(vec3(texture3D(%(inputTextureUnitIdentifier)s, stpPoint).rgb), 1.);
+        fragmentColor = vec4(vec3(normalizedSample), 1.);
+        //fragmentColor = vec4(vec3(stpPoint.x + stpPoint.y + stpPoint.z), 1.);
+        //fragmentColor = vec4(vec3(texture(%(inputTextureUnitIdentifier)s, stpPoint).rgb), 1.);
       }
     """
 
@@ -392,8 +397,14 @@ class GLFiltersTest(ScriptedLoadableModuleTest):
   def test_GLFilters1(self):
     """Test a multi-input filter"""
     import ShaderComputation
-    ShaderComputation.ShaderComputationTest().amigoMRUSPreIntraData()
+    nodes = ShaderComputation.ShaderComputationTest().amigoMRUSPreIntraData()
 
+    outputNode = slicer.vtkMRMLScalarVolumeNode()
+    outputNode.SetName('output')
+    slicer.mrmlScene.AddNode(outputNode)
+
+    logic = GLFiltersLogic()
+    logic.run(nodes[0], outputNode, 1)
 
   def test_GLFilters2(self):
     """ Ideally you should have several levels of tests.  At the lowest level
